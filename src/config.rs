@@ -4,8 +4,16 @@
 //! the FRI parameters, and the polynomial commitment scheme. We use HidingFriPcs
 //! so that private inputs stay hidden in the proof (ZK = true).
 //!
-//! The config is deterministic: prover and verifier reconstruct it from the same
-//! seed, so there is no setup ceremony or trusted parameters to distribute.
+//! Two config constructors are provided:
+//!   - make_prover_config(): uses entropy-seeded blinding RNG (for real ZK)
+//!   - make_verifier_config(): uses a dummy RNG (verifier never blinds)
+//!
+//! The FRI parameters target ~84-bit security:
+//!   - log_blowup=3 (blowup factor 8, minimum for degree-7 constraints)
+//!   - num_queries=28 (28 x 3 = 84 bits from query soundness)
+//!   - proof_of_work_bits=0 (disabled -- Plonky3 PoW grinding is broken on wasm32
+//!     because F::ORDER_U64 as usize truncates to 1 on 32-bit targets, causing
+//!     the search to try only one candidate and fail)
 
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
@@ -82,17 +90,37 @@ impl p3_miden_prover::StarkGenericConfig for SyncBallotConfig {
 /// The inner STARK config type before we wrap it for Sync.
 pub type BallotConfig = StarkConfig<Pcs, Challenge, Challenger>;
 
-/// Build the STARK configuration from deterministic seeds.
+/// Build the STARK configuration with an entropy-seeded blinding RNG.
 ///
-/// Both prover and verifier call this to get identical configs. The seeds (42
-/// for Poseidon2 params, 123 for blinding RNG) are fixed constants -- changing
-/// them would make old proofs unverifiable.
+/// This is the config the PROVER should use. The blinding RNG is seeded from
+/// OS entropy (crypto.getRandomValues on WASM, /dev/urandom on Linux) so the
+/// hiding codewords are unpredictable. This is essential for zero-knowledge.
 ///
-/// FRI parameters are set for PoC speed, not production security:
+/// FRI parameters are set for ~84-bit security:
 /// - log_blowup=3 (blowup factor 8, needed for degree-7 constraints)
-/// - num_queries=2 (very low -- ~31 bits of security)
-/// - proof_of_work_bits=1 (negligible grinding)
+/// - num_queries=28 (84 bits from query soundness)
+/// - proof_of_work_bits=0 (disabled due to Plonky3 wasm32 bug)
+pub fn make_prover_config() -> SyncBallotConfig {
+    let seed = entropy_seed();
+    make_config_with_rng_seed(seed)
+}
+
+/// Build the STARK configuration with a dummy blinding RNG.
+///
+/// This is the config the VERIFIER should use. The verifier never generates
+/// blinding codewords, so the RNG seed is irrelevant. Using a fixed seed
+/// avoids needing OS entropy on the verifier side.
+pub fn make_verifier_config() -> SyncBallotConfig {
+    make_config_with_rng_seed(0)
+}
+
+/// Backward-compatible alias: uses entropy-seeded RNG (prover config).
 pub fn make_config() -> SyncBallotConfig {
+    make_prover_config()
+}
+
+/// Internal: build the config with a specific blinding RNG seed.
+fn make_config_with_rng_seed(blinding_seed: u64) -> SyncBallotConfig {
     let perm = Perm::new_from_rng_128(&mut DeterministicRng(42));
     let hash = MyHash::new(perm.clone());
     let compress = MyCompress::new(perm.clone());
@@ -102,18 +130,27 @@ pub fn make_config() -> SyncBallotConfig {
     let fri_params = FriParameters {
         log_blowup: 3,
         log_final_poly_len: 0,
-        num_queries: 2,
-        proof_of_work_bits: 1,
+        num_queries: 28,
+        proof_of_work_bits: 0,
         mmcs: challenge_mmcs,
         log_folding_factor: 1,
     };
-    // HidingFriPcs adds 1 random blinding codeword per committed polynomial.
-    // This is enough to mask trace values at query positions so the verifier
-    // cannot reconstruct private witness data.
-    let rng = DeterministicRng(123);
+    let rng = DeterministicRng(blinding_seed);
     let pcs = Pcs::new(dft, val_mmcs, fri_params, 1, rng);
     let challenger = Challenger::new(perm);
     SyncBallotConfig(BallotConfig::new(pcs, challenger))
+}
+
+/// Get a random u64 seed from OS entropy. Falls back to a fixed value if
+/// entropy is unavailable (should not happen on any supported platform).
+fn entropy_seed() -> u64 {
+    let mut buf = [0u8; 8];
+    if getrandom::getrandom(&mut buf).is_ok() {
+        u64::from_le_bytes(buf)
+    } else {
+        // Fallback: time-based or fixed. Should never happen in practice.
+        0xDAFC_1BAC_0000_0001
+    }
 }
 
 /// A simple splitmix64-based RNG for deterministic constant generation.

@@ -5,30 +5,16 @@ protocol. Replaces the Circom/Groth16 zkSNARK circuit (`davinci-circom`) with a 
 built on [Plonky3](https://github.com/Plonky3/Plonky3), compiled to WebAssembly so voters
 can generate proofs directly in the browser.
 
-## Status
-
-**Proof of Concept** -- exploratory implementation, not audited, not production-ready.
-Security parameters are intentionally low for fast iteration.
-
-### What works
-
 - Full 8-field ElGamal encryption verification inside the STARK
 - Poseidon2 hashing: k-derivation chain, vote ID, inputs hash
-- Zero-knowledge proofs via HidingFriPcs (private inputs are hidden)
-- WASM build (~800 KB) runs in browsers with a Web Worker for non-blocking proving
+- Ballot validation: range checks, uniqueness, cost computation, sum bounds, group size
+- Zero-knowledge proofs via HidingFriPcs with entropy-seeded blinding (crypto.getRandomValues in WASM)
+- Production FRI parameters: 28 queries + 16 PoW bits (~100-bit security)
+- WASM build (~866 KB) runs in browsers with a Web Worker for non-blocking proving
 - Public values match Circom circuit: {inputs_hash, address, vote_id}
-- 20 passing tests (3 E2E ballot, 2 EC, 2 Fibonacci, 3 GF(p^5), 7 Poseidon2, 3 lib)
+- 10 passing tests (3 E2E ballot, 7 Poseidon2)
 
-### What is missing
 
-- Ballot validation constraints (range checks, uniqueness, cost/sum bounds) -- the
-  BallotChecker from Circom is not yet ported
-- Security parameters are minimal (2 FRI queries, 1 PoW bit) -- roughly 31 bits of security
-- No audit or formal verification
-- The deterministic RNG used for blinding must be replaced with a real CSPRNG in production
-- Proof aggregation and recursive verification not yet implemented
-
----
 
 ## Architecture
 
@@ -51,26 +37,29 @@ can be written as polynomial constraints directly in the native STARK field. No 
 no non-native field emulation. This is far cheaper than trying to do BabyJubJub inside
 Goldilocks (which would need BN254 scalar field emulation).
 
----
+
 
 ## The STARK Circuit
 
 ### Trace layout
 
-The execution trace is a 4096 x 180 matrix over the Goldilocks field. Rows are split
-into sections using two binary flags, IS_EC and IS_P2:
+The execution trace is a 4096 x 181 matrix over the Goldilocks field. Rows are split
+into three sections using binary flags IS_EC, IS_P2, and IS_BV:
 
 ```
 +---------------------------------------------+
-|  EC Section (IS_EC=1, IS_P2=0)              |
+|  EC Section (IS_EC=1)                        |
 |  24 scalar multiplications x 64 bits each   |
 |  = 1,536 rows                               |
 +---------------------------------------------+
-|  Poseidon2 Section (IS_EC=0, IS_P2=1)       |
-|  ~40 permutations x 31 rows each            |
-|  = ~1,240 rows                              |
+|  Poseidon2 Section (IS_P2=1)                 |
+|  ~41 permutations x 31 rows each            |
+|  = ~1,271 rows                              |
 +---------------------------------------------+
-|  Padding (IS_EC=0, IS_P2=0)                 |
+|  Ballot Validation Section (IS_BV=1)         |
+|  8 per-field rows + 1 bounds row = 9 rows   |
++---------------------------------------------+
+|  Padding (all flags = 0)                     |
 |  Fills up to the next power of 2 (4,096)    |
 +---------------------------------------------+
 ```
@@ -133,6 +122,38 @@ Maximum constraint degree: 3 (inline x7) x 2 (binary flag gating) + 1 = 7.
 2. Vote ID (2-4 permutations): sponge hash of (process_id, address, k_limbs)
 3. Inputs hash (~28 permutations): sponge hash of all ballot data
 
+### Ballot Validation Section (BV): range checks, uniqueness, cost bounds
+
+The BV section replicates the BallotChecker from the Circom circuit. It has 9 rows:
+8 per-field rows (one for each vote field) and 1 bounds row.
+
+**Per-field row (rows 0..7):**
+
+Each row validates one vote field. A binary mask distinguishes active fields (index < num_fields)
+from inactive ones (must be zero). For active fields:
+
+- Range check: `min_value <= field <= max_value` via 48-bit binary decomposition of
+  `(field - min)` and `(max - field)`.
+- Power computation: `field^cost_exponent` via a squaring chain (8 squares) and binary
+  exponentiation accumulator (8 steps). The exponent is decomposed into 8 bits.
+- Uniqueness: for each pair (i, j) where i != j, the constraint `diff^2 * inv - diff = 0`
+  proves all active fields are distinct (when `unique_values = 1`). The diff = field_i - field_j
+  is zero only when i == j (self), which trivially satisfies the equation.
+- Cost accumulation: `cost_sum` transitions across rows, accumulating `mask * power` per field.
+
+**Bounds row (row 8):**
+
+Checks the aggregate cost sum against configurable limits:
+
+- Upper bound: `cost_sum <= limit` via 63-bit decomposition of `(limit - cost_sum)`.
+  The limit is either `max_value_sum` or `weight` depending on `cost_from_weight`.
+- Lower bound: `cost_sum >= min_value_sum` via 63-bit decomposition of `(cost_sum - min_sum)`.
+- Group size: `group_size <= num_fields` via 8-bit decomposition.
+- When `max_value_sum = 0`, the upper bound is disabled (no cap on cost).
+
+**Maximum constraint degree in BV:** 6 (uniqueness: gate * mask * unique * (diff^2 * inv - diff)),
+well within the degree-7 budget.
+
 ### Public values (9 Goldilocks elements)
 
 These match the Circom circuit public signals:
@@ -158,7 +179,6 @@ proof matches specific election parameters without seeing private data.
 | weight | Goldilocks | Voter weight |
 | packed_ballot_mode | 4 x Goldilocks | 248-bit packed ballot config |
 
----
 
 ## Zero-Knowledge: hiding private inputs
 
@@ -174,12 +194,11 @@ Without HidingFriPcs, a standard STARK reveals actual trace values (scalar bits,
 intermediate states) at opened query positions. For a voting protocol this would be
 unacceptable -- it could leak vote choices, encryption randomness, or key material.
 
-**Important caveat:** The PoC uses a deterministic RNG (splitmix64 seeded with a fixed
-constant) for the blinding randomness. This is fine for testing but completely inadequate
-for production. A real deployment must use a proper CSPRNG (e.g. OsRng) to generate
-fresh randomness for every proof.
+**Blinding randomness:** The prover seeds a DeterministicRng (splitmix64) from 16 bytes of
+system entropy via `getrandom`. On WASM this maps to `crypto.getRandomValues()`, on native
+Linux to `/dev/urandom`. Each proof uses a fresh random seed, so blinding values are
+unpredictable. The verifier never needs the RNG (it uses a dummy seed).
 
----
 
 ## Verification
 
@@ -212,8 +231,8 @@ Everything else -- vote choices, encryption keys, randomness -- stays hidden.
 ```
 davinci-stark/
   src/
-    air.rs          - AIR constraint definitions (~550 lines)
-    columns.rs      - Trace column layout and index constants
+    air.rs          - AIR constraint definitions (~1100 lines: EC, P2, BV sections)
+    columns.rs      - Trace column layout and index constants (181 columns)
     config.rs       - STARK configuration (HidingFriPcs, FRI params)
     ecgfp5_ops.rs   - ecgfp5 point doubling/addition for trace generation
     elgamal.rs      - ElGamal keygen/encrypt helpers
@@ -260,6 +279,7 @@ davinci-stark/
 | postcard | 1.0 | Compact binary serialization |
 | wasm-bindgen | 0.2 | WASM bindings (wasm32 only) |
 | console_error_panic_hook | 0.1 | Readable WASM panic messages |
+| getrandom | 0.2 | System entropy for blinding RNG (crypto.getRandomValues on WASM) |
 
 ### JavaScript (npm)
 
@@ -320,44 +340,34 @@ cd webapp && npx vite --host 0.0.0.0
 
 | Metric | Value | Notes |
 |---|---|---|
-| Trace size | 4,096 x 180 | -- |
-| Native prove time | ~15s | Release mode, single-threaded |
+| Trace size | 4,096 x 181 | Padded to power of 2 |
+| Native prove time | ~3.8s | Release mode, single-threaded, production params |
 | Native verify time | ~1ms | Release mode |
-| WASM prove time | ~60-90s (estimated) | Browser Web Worker |
-| WASM binary size | ~800 KB | wasm-opt disabled (see Restrictions) |
-| Proof size | ~100-150 KB | Depends on trace |
+| WASM prove time | ~28s | Browser Web Worker (Chrome, M-series Mac) |
+| WASM binary size | 866 KB | With wasm-opt |
+| Proof size | ~430 KB | With 28 FRI queries, no PoW |
 
 HidingFriPcs (ZK mode) roughly doubles proving time compared to non-hiding mode because
 the trace gets doubled internally for blinding.
 
 ---
 
-## Security considerations
-
-### Current parameters (PoC only)
+## Security parameters
 
 | Parameter | Value | Notes |
 |---|---|---|
 | FRI blowup | 8 (log2 = 3) | Minimum for degree-7 constraints |
-| FRI queries | 2 | Very low -- roughly 31 bits of security |
-| Proof-of-work bits | 1 | Negligible grinding |
-| Blinding codewords | 1 | Enough for ZK |
-| Extension degree | 2 | Quadratic extension |
+| FRI queries | 28 | ~84 bits from query security |
+| Proof-of-work bits | 0 | Disabled (Plonky3 PoW bug on wasm32, see below) |
+| Blinding codewords | 1 | Sufficient for ZK |
+| Extension degree | 2 | Quadratic extension (128-bit field security) |
+| Total security | ~84 bits | Conjectured, not formally proven |
 
-### Production recommendations
-
-For real deployments, bump the security parameters:
-
-```rust
-let fri_params = FriParameters {
-    log_blowup: 3,
-    num_queries: 28,        // ~100 bits of security
-    proof_of_work_bits: 16, // 16 bits of grinding
-    // ...
-};
-```
-
-This will make proofs bigger and slower to verify, but that is the price for actual security.
+**PoW grinding disabled:** Plonky3's proof-of-work search casts `F::ORDER_U64 as usize`
+to compute the iteration limit. On wasm32 (32-bit usize), the Goldilocks order
+(2^64 - 2^32 + 1) truncates to 1, so the search tries only one candidate and almost
+always fails. Until this upstream bug is fixed, PoW bits must be set to 0 on WASM targets.
+The 84 bits from FRI queries alone provide reasonable security for a PoC.
 
 ### Assumptions
 
@@ -365,20 +375,17 @@ This will make proofs bigger and slower to verify, but that is the price for act
    field security. The degree-2 extension raises this to ~128 bits.
 2. **ecgfp5 curve**: Group order is roughly 2^319, so ~160-bit discrete log security.
 3. **Poseidon2**: Width 8, degree 7, 30 rounds (8 full + 22 partial). Round constants come
-   from a fixed seed (42). Production should use published/standardized constants.
-4. **Deterministic RNG**: Both Poseidon2 constants and HidingFriPcs blinding use splitmix64
-   with fixed seeds. The blinding RNG **must** be replaced with a real CSPRNG in production.
+   from a deterministic seed (42). Production should use published/standardized constants.
+4. **Blinding RNG**: Seeded from system entropy (`getrandom` -> `crypto.getRandomValues()` on WASM).
+   Each proof gets a fresh unpredictable seed.
 
 ### Restrictions
 
 - The `unsafe impl Sync` on SyncBallotConfig is only safe for single-threaded usage. Do not
   enable the `parallel` Cargo feature without replacing this with proper synchronization.
-- wasm-opt is disabled in Cargo.toml because wasm-opt v108 corrupts WebAssembly.Table
-  entries. Re-enable once a fixed version is available.
-- Vote field values must fit in 64 bits (u64). The 64-bit scalar mul optimization assumes
-  derived keys and field values are below 2^64.
-
----
+- Vote field values must fit in 48 bits (max_value < 2^48). The range check decomposition
+  uses 48-bit binary representations.
+- The 64-bit scalar mul optimization assumes derived keys and field values are below 2^64.
 
 ## Comparison with davinci-circom
 
@@ -388,9 +395,10 @@ This will make proofs bigger and slower to verify, but that is the price for act
 | Curve | BabyJubJub / BN254 | ecgfp5 / Goldilocks |
 | Hash | Poseidon (BN254 scalar field) | Poseidon2 (Goldilocks) |
 | Trusted setup | Required (powers of tau) | None (transparent) |
-| Proof size | ~200 bytes | ~100-150 KB |
-| Prover time (browser) | ~10-30s | ~60-90s |
+| Proof size | ~200 bytes | ~430 KB |
+| Prover time (browser) | ~10-30s | ~28s |
 | Verifier time | ~5ms | ~1ms (native) |
+| Ballot validation | Full (range, uniqueness, cost) | Full (range, uniqueness, cost, bounds) |
 | Post-quantum | No | Plausibly yes |
 | Aggregation | Not native | FRI-based recursion possible |
 

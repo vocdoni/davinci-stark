@@ -122,6 +122,136 @@ pub struct BallotOutputs {
     pub k_derived: [Goldilocks; NUM_FIELDS],
 }
 
+/// Unpacked ballot mode: all configuration parameters decoded from the packed
+/// 248-bit ballot mode value. Matches the circom UnpackBallotMode output.
+#[derive(Clone, Debug)]
+pub struct BallotMode {
+    pub num_fields: u64,
+    pub group_size: u64,
+    pub unique_values: u64,
+    pub cost_from_weight: u64,
+    pub cost_exponent: u64,
+    pub max_value: u64,
+    pub min_value: u64,
+    pub max_value_sum: u64,
+    pub min_value_sum: u64,
+}
+
+impl BallotMode {
+    /// Unpack ballot mode from 4 Goldilocks elements (each holding a 62-bit chunk).
+    pub fn unpack(packed: &[Goldilocks; 4]) -> Self {
+        // Reconstruct the 248-bit integer from four 62-bit chunks.
+        let mut bits: u128 = 0;
+        let mut shift = 0u32;
+        // We only need the first 248 bits; use u128 for the first two chunks,
+        // then handle the upper bits carefully.
+        let c0 = packed[0].as_canonical_u64() as u128;
+        let c1 = packed[1].as_canonical_u64() as u128;
+        let c2 = packed[2].as_canonical_u64() as u128;
+        let c3 = packed[3].as_canonical_u64() as u128;
+
+        // Full 248-bit value spread across 4 x 62-bit chunks:
+        // value = c0 + c1*2^62 + c2*2^124 + c3*2^186
+        // Extract fields by bit position:
+        let extract = |start: u32, width: u32| -> u64 {
+            // Which chunk does this bit range start in?
+            let chunk_bits = 62u32;
+            let mut val: u128 = 0;
+            let mut remaining = width;
+            let mut pos = start;
+            while remaining > 0 {
+                let chunk_idx = pos / chunk_bits;
+                let bit_in_chunk = pos % chunk_bits;
+                let chunk_val = match chunk_idx {
+                    0 => c0, 1 => c1, 2 => c2, 3 => c3, _ => 0
+                };
+                let available = chunk_bits - bit_in_chunk;
+                let take = remaining.min(available);
+                let mask = if take >= 128 { u128::MAX } else { (1u128 << take) - 1 };
+                let bits_from_chunk = (chunk_val >> bit_in_chunk) & mask;
+                val |= bits_from_chunk << (width - remaining);
+                pos += take;
+                remaining -= take;
+            }
+            val as u64
+        };
+
+        BallotMode {
+            num_fields:      extract(0, 8),
+            group_size:      extract(8, 8),
+            unique_values:   extract(16, 1),
+            cost_from_weight: extract(17, 1),
+            cost_exponent:   extract(18, 8),
+            max_value:       extract(26, 48),
+            min_value:       extract(74, 48),
+            max_value_sum:   extract(122, 63),
+            min_value_sum:   extract(185, 63),
+        }
+    }
+
+    /// Pack ballot mode into 4 Goldilocks elements (each holding a 62-bit chunk).
+    /// Inverse of unpack().
+    pub fn pack(&self) -> [Goldilocks; 4] {
+        // Build a 248-bit integer from the individual fields.
+        // Bit layout (LSB first):
+        //   [0..8)    num_fields
+        //   [8..16)   group_size
+        //   [16]      unique_values
+        //   [17]      cost_from_weight
+        //   [18..26)  cost_exponent
+        //   [26..74)  max_value (48 bits)
+        //   [74..122) min_value (48 bits)
+        //   [122..185) max_value_sum (63 bits)
+        //   [185..248) min_value_sum (63 bits)
+
+        // Use a [u64; 4] as a 256-bit accumulator, then split into 62-bit chunks.
+        let mut bits = [0u64; 4]; // 256 bits total
+
+        let set_bits = |bits: &mut [u64; 4], start: u32, width: u32, val: u64| {
+            for b in 0..width {
+                let bit_pos = start + b;
+                let word = (bit_pos / 64) as usize;
+                let bit = bit_pos % 64;
+                if (val >> b) & 1 == 1 {
+                    bits[word] |= 1u64 << bit;
+                }
+            }
+        };
+
+        set_bits(&mut bits, 0, 8, self.num_fields);
+        set_bits(&mut bits, 8, 8, self.group_size);
+        set_bits(&mut bits, 16, 1, self.unique_values);
+        set_bits(&mut bits, 17, 1, self.cost_from_weight);
+        set_bits(&mut bits, 18, 8, self.cost_exponent);
+        set_bits(&mut bits, 26, 48, self.max_value);
+        set_bits(&mut bits, 74, 48, self.min_value);
+        set_bits(&mut bits, 122, 63, self.max_value_sum);
+        set_bits(&mut bits, 185, 63, self.min_value_sum);
+
+        // Now extract four 62-bit chunks from the 256-bit value.
+        // chunk_k = bits[k*62 .. (k+1)*62)
+        let extract_chunk = |bits: &[u64; 4], chunk_start: u32| -> u64 {
+            let mut val = 0u64;
+            for b in 0..62u32 {
+                let bit_pos = chunk_start + b;
+                let word = (bit_pos / 64) as usize;
+                let bit = bit_pos % 64;
+                if word < 4 && (bits[word] >> bit) & 1 == 1 {
+                    val |= 1u64 << b;
+                }
+            }
+            val
+        };
+
+        [
+            Goldilocks::from_u64(extract_chunk(&bits, 0)),
+            Goldilocks::from_u64(extract_chunk(&bits, 62)),
+            Goldilocks::from_u64(extract_chunk(&bits, 124)),
+            Goldilocks::from_u64(extract_chunk(&bits, 186)),
+        ]
+    }
+}
+
 /// Generate the full 8-field ballot proof trace.
 ///
 /// This is the main trace generator. It builds a 4096 x 180 matrix covering:
@@ -262,7 +392,8 @@ pub fn generate_full_ballot_trace(
     let ec_total_rows: usize = ec_row_counts.iter().sum();
     let p2_perms = k_p2_traces.len() + vote_id_p2_traces.len() + inputs_hash_p2_traces.len();
     let p2_total_rows = p2_perms * (poseidon2::TOTAL_ROUNDS + 1);
-    let data_rows = ec_total_rows + p2_total_rows;
+    let bv_rows = NUM_FIELDS + 1; // 8 field rows + 1 bounds row
+    let data_rows = ec_total_rows + p2_total_rows + bv_rows;
     let total_rows = data_rows.next_power_of_two().max(64);
     let mut values = vec![Goldilocks::ZERO; total_rows * TRACE_WIDTH];
 
@@ -297,16 +428,33 @@ pub fn generate_full_ballot_trace(
         perm_id += 1;
     }
 
+    // ============================================================
+    // Step 5b: Ballot validation rows
+    // ============================================================
+    let bv_start = p2_row;
+    let mode = BallotMode::unpack(&inputs.packed_ballot_mode);
+    let field_vals: Vec<u64> = inputs.fields.iter().map(|s| s.0[0]).collect();
+
+    fill_ballot_validation_rows(
+        &mut values,
+        bv_start,
+        &field_vals,
+        &mode,
+        inputs.weight.as_canonical_u64(),
+    );
+    let bv_end = bv_start + bv_rows;
+
     // Padding rows
     let neutral = Point::NEUTRAL;
     let mut pad_acc = c2_points[0];
-    for i in p2_row..total_rows {
+    for i in bv_end..total_rows {
         let row_start = i * TRACE_WIDTH;
         let row = &mut values[row_start..row_start + TRACE_WIDTH];
         let (doubled, _) = fill_scalar_mul_row(row, &pad_acc, &neutral, 0, 3);
         row[IS_LAST_IN_PHASE] = Goldilocks::ONE;
         row[IS_EC] = Goldilocks::ZERO;
         row[IS_P2] = Goldilocks::ZERO;
+        row[IS_BV] = Goldilocks::ZERO;
         pad_acc = doubled;
     }
 
@@ -579,4 +727,219 @@ pub fn add_points(a: &Point, b: &Point) -> Point {
         U: u_pre,
         T: t8 + t9,
     }
+}
+
+// ==========================================================================
+// Ballot validation trace generation
+// ==========================================================================
+
+/// Binary exponentiation: compute base^exp using the 8-bit exponent.
+/// Returns (result, squaring_chain, exponent_bits, accumulator_chain).
+fn binary_exp_goldilocks(base: u64, exp: u64) -> (u64, [u64; 8], [u64; 8], [u64; 8]) {
+    let p = Goldilocks::ORDER_U64;
+    let mut sq = [0u64; 8];
+    let mut exp_bits = [0u64; 8];
+    let mut acc = [0u64; 8];
+
+    // Squaring chain: sq[0] = base, sq[k] = sq[k-1]^2 mod p
+    sq[0] = base % p;
+    for k in 1..8 {
+        sq[k] = ((sq[k-1] as u128 * sq[k-1] as u128) % p as u128) as u64;
+    }
+
+    // Exponent bits (LSB first)
+    for k in 0..8 {
+        exp_bits[k] = (exp >> k) & 1;
+    }
+
+    // Running product: acc[k] = product of (exp_bit[j] ? sq[j] : 1) for j=0..k
+    let selector = |k: usize| -> u64 {
+        if exp_bits[k] == 1 { sq[k] } else { 1 }
+    };
+    acc[0] = selector(0);
+    for k in 1..8 {
+        acc[k] = ((acc[k-1] as u128 * selector(k) as u128) % p as u128) as u64;
+    }
+
+    (acc[7], sq, exp_bits, acc)
+}
+
+/// Fill the 9 ballot validation rows into the trace.
+///
+/// Rows 0..7: per-field validation (range checks, power computation, uniqueness)
+/// Row 8: cost sum bounds check + group_size check
+pub fn fill_ballot_validation_rows(
+    values: &mut [Goldilocks],
+    start_row: usize,
+    field_vals: &[u64],
+    mode: &BallotMode,
+    weight: u64,
+) {
+    let p = Goldilocks::ORDER_U64;
+    let g = |v: u64| Goldilocks::from_u64(v % p);
+
+    // Compute all field powers and running cost sum
+    let mut powers = [0u64; NUM_FIELDS];
+    let mut cost_sums = [0u64; NUM_FIELDS];
+    let mut running = 0u64;
+
+    for i in 0..NUM_FIELDS {
+        let mask = if (i as u64) < mode.num_fields { 1u64 } else { 0u64 };
+        let (power, _, _, _) = binary_exp_goldilocks(field_vals[i], mode.cost_exponent);
+        powers[i] = power;
+        running = (running + mask * power) % p;
+        cost_sums[i] = running;
+    }
+    let total_cost = running;
+
+    // Rows 0..7: per-field validation
+    for i in 0..NUM_FIELDS {
+        let row_idx = start_row + i;
+        let row_start = row_idx * TRACE_WIDTH;
+        let row = &mut values[row_start..row_start + TRACE_WIDTH];
+
+        let mask = if (i as u64) < mode.num_fields { 1u64 } else { 0u64 };
+        let fv = field_vals[i];
+
+        // All 8 field values (for uniqueness cross-referencing)
+        for j in 0..NUM_FIELDS {
+            row[BV_FIELDS + j] = g(field_vals[j]);
+        }
+
+        // Config values (constant across all BV rows)
+        row[BV_NUM_FIELDS] = g(mode.num_fields);
+        row[BV_ROW_INDEX] = g(i as u64);
+        row[BV_MASK] = g(mask);
+        row[BV_MIN_VALUE] = g(mode.min_value);
+        row[BV_MAX_VALUE] = g(mode.max_value);
+        row[BV_UNIQUE] = g(mode.unique_values);
+        row[BV_COST_FROM_WEIGHT] = g(mode.cost_from_weight);
+        row[BV_COST_EXP] = g(mode.cost_exponent);
+        row[BV_MAX_SUM] = g(mode.max_value_sum);
+        row[BV_MIN_SUM] = g(mode.min_value_sum);
+        row[BV_WEIGHT] = g(weight);
+        row[BV_GROUP_SIZE] = g(mode.group_size);
+
+        // Range check: decompose (fv - min_value) into 48 bits
+        if mask == 1 {
+            let low = fv.wrapping_sub(mode.min_value);
+            for b in 0..BV_LOW_BITS_COUNT {
+                row[BV_LOW_BITS + b] = g((low >> b) & 1);
+            }
+            let high = mode.max_value.wrapping_sub(fv);
+            for b in 0..BV_HIGH_BITS_COUNT {
+                row[BV_HIGH_BITS + b] = g((high >> b) & 1);
+            }
+        }
+
+        // Binary exponentiation
+        let (power, sq, exp_bits, acc) = binary_exp_goldilocks(fv, mode.cost_exponent);
+        for k in 0..8 {
+            row[BV_EXP_BITS + k] = g(exp_bits[k]);
+            row[BV_SQ + k] = g(sq[k]);
+            row[BV_ACC + k] = g(acc[k]);
+        }
+        row[BV_POWER] = g(power);
+        row[BV_COST_SUM] = g(cost_sums[i]);
+
+        // Uniqueness: compute inverses of (field[i] - field[j]) for all j
+        for j in 0..NUM_FIELDS {
+            if j == i {
+                row[BV_INV_DIFF + j] = Goldilocks::ZERO;
+            } else {
+                let mask_j = if (j as u64) < mode.num_fields { 1u64 } else { 0u64 };
+                if mask == 1 && mask_j == 1 && mode.unique_values == 1 && fv != field_vals[j] {
+                    // Compute modular inverse of (fv - field_vals[j]) mod p
+                    let diff = (fv as i128 - field_vals[j] as i128).rem_euclid(p as i128) as u64;
+                    let inv = mod_inverse(diff, p);
+                    row[BV_INV_DIFF + j] = g(inv);
+                } else {
+                    row[BV_INV_DIFF + j] = Goldilocks::ZERO;
+                }
+            }
+        }
+
+        // Section flags
+        row[IS_EC] = Goldilocks::ZERO;
+        row[IS_P2] = Goldilocks::ZERO;
+        row[IS_BV] = Goldilocks::ONE;
+    }
+
+    // Row 8: bounds check
+    let bounds_idx = start_row + NUM_FIELDS;
+    let bounds_start = bounds_idx * TRACE_WIDTH;
+    let bounds_row = &mut values[bounds_start..bounds_start + TRACE_WIDTH];
+
+    // Replicate field values and config
+    for j in 0..NUM_FIELDS {
+        bounds_row[BV_FIELDS + j] = g(field_vals[j]);
+    }
+    bounds_row[BV_NUM_FIELDS] = g(mode.num_fields);
+    bounds_row[BV_ROW_INDEX] = g(NUM_FIELDS as u64); // index = 8 marks bounds row
+    bounds_row[BV_MASK] = Goldilocks::ZERO; // not a field row
+    bounds_row[BV_MIN_VALUE] = g(mode.min_value);
+    bounds_row[BV_MAX_VALUE] = g(mode.max_value);
+    bounds_row[BV_UNIQUE] = g(mode.unique_values);
+    bounds_row[BV_COST_FROM_WEIGHT] = g(mode.cost_from_weight);
+    bounds_row[BV_COST_EXP] = g(mode.cost_exponent);
+    bounds_row[BV_MAX_SUM] = g(mode.max_value_sum);
+    bounds_row[BV_MIN_SUM] = g(mode.min_value_sum);
+    bounds_row[BV_WEIGHT] = g(weight);
+    bounds_row[BV_GROUP_SIZE] = g(mode.group_size);
+
+    // Compute the limit based on cost_from_weight flag
+    let limit = if mode.cost_from_weight == 1 { weight } else { mode.max_value_sum };
+    bounds_row[BV_LIMIT] = g(limit);
+    bounds_row[BV_BOUNDS_COST] = g(total_cost);
+
+    // Decompose (limit - total_cost) into 63 bits
+    // Only meaningful when max_value_sum > 0 (i.e., there's an upper bound)
+    let upper_diff = if limit >= total_cost { limit - total_cost } else { 0 };
+    for b in 0..BV_LIMIT_BITS_COUNT {
+        bounds_row[BV_LIMIT_BITS + b] = g((upper_diff >> b) & 1);
+    }
+
+    // Decompose (total_cost - min_sum) into 63 bits
+    let lower_diff = if total_cost >= mode.min_value_sum { total_cost - mode.min_value_sum } else { 0 };
+    for b in 0..BV_MINSUB_BITS_COUNT {
+        bounds_row[BV_MINSUB_BITS + b] = g((lower_diff >> b) & 1);
+    }
+
+    // Group size check: decompose (num_fields - group_size) into 8 bits
+    let gs_diff = if mode.num_fields >= mode.group_size { mode.num_fields - mode.group_size } else { 0 };
+    for b in 0..BV_GS_BITS_COUNT {
+        bounds_row[BV_GS_BITS + b] = g((gs_diff >> b) & 1);
+    }
+
+    // Is max_sum zero? (meaning no upper bound)
+    let max_sum_is_zero = if mode.max_value_sum == 0 { 1u64 } else { 0u64 };
+    bounds_row[BV_MAX_SUM_IS_ZERO] = g(max_sum_is_zero);
+    if mode.max_value_sum != 0 {
+        bounds_row[BV_MAX_SUM_INV] = g(mod_inverse(mode.max_value_sum % p, p));
+    }
+
+    bounds_row[BV_IS_BOUNDS] = Goldilocks::ONE; // marks this as the bounds row
+    bounds_row[BV_COST_SUM] = g(total_cost);
+    bounds_row[IS_EC] = Goldilocks::ZERO;
+    bounds_row[IS_P2] = Goldilocks::ZERO;
+    bounds_row[IS_BV] = Goldilocks::ONE;
+}
+
+/// Compute modular inverse of a mod p using extended Euclidean algorithm.
+fn mod_inverse(a: u64, p: u64) -> u64 {
+    if a == 0 { return 0; }
+    let mut old_r = a as i128;
+    let mut r = p as i128;
+    let mut old_s: i128 = 1;
+    let mut s: i128 = 0;
+    while r != 0 {
+        let q = old_r / r;
+        let tmp = r;
+        r = old_r - q * r;
+        old_r = tmp;
+        let tmp = s;
+        s = old_s - q * s;
+        old_s = tmp;
+    }
+    ((old_s % p as i128 + p as i128) % p as i128) as u64
 }

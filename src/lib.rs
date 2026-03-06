@@ -25,7 +25,7 @@ use ecgfp5::curve::Point;
 use ecgfp5::scalar::Scalar;
 
 use air::BallotAir;
-use config::{SyncBallotConfig, make_config};
+use config::{SyncBallotConfig, make_prover_config, make_verifier_config};
 use trace::{generate_ballot_trace, generate_full_ballot_trace, BallotInputs, BallotOutputs};
 
 /// A complete ballot proof: the STARK proof object plus the public values
@@ -40,7 +40,7 @@ pub struct BallotProof {
 /// This is the backward-compatible entry point that proves one (C1, C2) pair.
 /// For the full 8-field ballot proof, use `prove_full_ballot` instead.
 pub fn prove_ballot(k: &Scalar, field_val: &Scalar, pk: &Point) -> BallotProof {
-    let config = make_config();
+    let config = make_prover_config();
     let air = BallotAir::new();
     let (trace, pv) = generate_ballot_trace(k, field_val, pk);
     let proof = prove(&config, &air, &trace, &pv);
@@ -56,7 +56,7 @@ pub fn prove_ballot(k: &Scalar, field_val: &Scalar, pk: &Point) -> BallotProof {
 /// Returns the proof and the computed outputs (C1/C2 points, vote_id, etc.)
 /// so the caller can use them for further processing or display.
 pub fn prove_full_ballot(inputs: &BallotInputs) -> (BallotProof, BallotOutputs) {
-    let config = make_config();
+    let config = make_prover_config();
     let air = BallotAir::new();
     let (trace, pv, outputs) = generate_full_ballot_trace(inputs);
     let proof = prove(&config, &air, &trace, &pv);
@@ -74,7 +74,7 @@ pub fn prove_full_ballot(inputs: &BallotInputs) -> (BallotProof, BallotOutputs) 
 /// Reconstructs the STARK config (deterministic, same as the prover), then
 /// runs the Plonky3 verifier. Returns Ok(()) if the proof is valid.
 pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), impl core::fmt::Debug> {
-    let config = make_config();
+    let config = make_verifier_config();
     let air = BallotAir::new();
     let var_len_pis: Vec<&[&[Goldilocks]]> = vec![];
     verify(

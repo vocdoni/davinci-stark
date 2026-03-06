@@ -119,7 +119,10 @@ pub const IS_EC: usize = IS_LAST_IN_PHASE + 1; // 178
 /// 1 when this row is a Poseidon2 hash row, 0 otherwise.
 pub const IS_P2: usize = IS_EC + 1; // 179
 
-// When both IS_EC=0 and IS_P2=0 the row is padding (no constraints enforced).
+/// 1 when this row is a ballot validation row, 0 otherwise.
+pub const IS_BV: usize = IS_P2 + 1; // 180
+
+// When IS_EC=0 and IS_P2=0 and IS_BV=0, the row is padding (no constraints).
 
 // ==========================================================================
 // Poseidon2 columns (active when IS_P2 = 1)
@@ -160,20 +163,128 @@ pub const P2_SBOX_X3: usize = 19; // 8 columns (19..26)
 pub const P2_SBOX_X6: usize = 27; // 8 columns (27..34)
 
 // ==========================================================================
-// Ballot validation columns (future use, overlapping via section gating)
+// Ballot validation columns (active when IS_BV = 1)
+//
+// The BV section checks that vote field values satisfy the ballot rules:
+// range bounds, uniqueness, cost/sum limits. It uses 9 rows (one per field
+// plus a bounds-check row). These columns physically overlap with EC/P2
+// columns since the sections never share a row.
 // ==========================================================================
 
-/// Vote field values for the 8 fields, used in ballot validation constraints.
-/// Not yet enforced -- planned for Phase 5 (range checks, uniqueness, etc.).
-pub const BV_FIELDS: usize = 0;
+/// All 8 field values, replicated on every BV row for cross-referencing
+/// (e.g. uniqueness checks need access to all fields from each row).
+pub const BV_FIELDS: usize = 0; // cols 0..7
+
+/// Number of active vote fields (num_fields from ballot mode).
 pub const BV_NUM_FIELDS: usize = 8;
+
+/// Index of the field being checked on this row (0..7 for field rows, 8 for bounds row).
+pub const BV_ROW_INDEX: usize = 9;
+
+/// Mask bit: 1 if this field is active (index < num_fields), 0 otherwise.
+pub const BV_MASK: usize = 10;
+
+/// Minimum allowed field value (from ballot mode, replicated on each row).
+pub const BV_MIN_VALUE: usize = 11;
+
+/// Maximum allowed field value (from ballot mode, replicated on each row).
+pub const BV_MAX_VALUE: usize = 12;
+
+/// unique_values flag from ballot mode (1 = enforce uniqueness).
+pub const BV_UNIQUE: usize = 13;
+
+/// cost_from_weight flag (0 = use max_value_sum as limit, 1 = use weight).
+pub const BV_COST_FROM_WEIGHT: usize = 14;
+
+/// Cost exponent (the power to raise each field value to).
+pub const BV_COST_EXP: usize = 15;
+
+/// Maximum sum of field^exponent values (upper bound on total cost).
+pub const BV_MAX_SUM: usize = 16;
+
+/// Minimum sum of field^exponent values (lower bound on total cost).
+pub const BV_MIN_SUM: usize = 17;
+
+/// Voter weight (alternative upper bound when cost_from_weight=1).
+pub const BV_WEIGHT: usize = 18;
+
+/// Group size from ballot mode.
+pub const BV_GROUP_SIZE: usize = 19;
+
+/// 48-bit decomposition of (field_value - min_value). Proves field >= min.
+/// These 48 columns (20..67) each hold a single bit.
+pub const BV_LOW_BITS: usize = 20;
+pub const BV_LOW_BITS_COUNT: usize = 48;
+
+/// 48-bit decomposition of (max_value - field_value). Proves field <= max.
+/// These 48 columns (68..115) each hold a single bit.
+pub const BV_HIGH_BITS: usize = BV_LOW_BITS + BV_LOW_BITS_COUNT; // 68
+pub const BV_HIGH_BITS_COUNT: usize = 48;
+
+/// 8-bit decomposition of the cost exponent (for binary exponentiation).
+pub const BV_EXP_BITS: usize = BV_HIGH_BITS + BV_HIGH_BITS_COUNT; // 116
+pub const BV_EXP_BITS_COUNT: usize = 8;
+
+/// Squaring chain for binary exponentiation: sq[0]=field_val, sq[k]=sq[k-1]^2.
+pub const BV_SQ: usize = BV_EXP_BITS + BV_EXP_BITS_COUNT; // 124
+pub const BV_SQ_COUNT: usize = 8;
+
+/// Running product for binary exponentiation:
+/// acc[0] = exp_bit[0]*sq[0] + (1-exp_bit[0])
+/// acc[k] = acc[k-1] * (exp_bit[k]*sq[k] + (1-exp_bit[k]))
+pub const BV_ACC: usize = BV_SQ + BV_SQ_COUNT; // 132
+pub const BV_ACC_COUNT: usize = 8;
+
+/// The final power result: field^exponent = acc[7].
+pub const BV_POWER: usize = BV_ACC + BV_ACC_COUNT; // 140
+
+/// Running cost sum: cost_sum[i] = sum of mask[j]*power[j] for j=0..i.
+/// On the last field row (index=7), this holds the total cost.
+pub const BV_COST_SUM: usize = BV_POWER + 1; // 141
+
+/// Inverses for uniqueness: inv_diff[j] = 1/(field[i] - field[j]) for j=0..7, j!=i.
+/// Only meaningful when both fields are active and unique_values=1.
+/// We store 8 values (using 0 for the self-position j==i).
+pub const BV_INV_DIFF: usize = BV_COST_SUM + 1; // 142
+pub const BV_INV_DIFF_COUNT: usize = 8;
+
+/// On the bounds row (BV_ROW_INDEX=8):
+/// 63-bit decomposition of (limit - total_cost). Proves cost <= limit.
+pub const BV_LIMIT_BITS: usize = 20; // reuse low_bits columns on bounds row
+pub const BV_LIMIT_BITS_COUNT: usize = 63;
+
+/// On the bounds row: 63-bit decomposition of (total_cost - min_sum).
+/// Proves cost >= min_sum.
+pub const BV_MINSUB_BITS: usize = BV_LIMIT_BITS + BV_LIMIT_BITS_COUNT; // 83
+pub const BV_MINSUB_BITS_COUNT: usize = 63;
+
+/// On the bounds row: the computed limit value (max_value_sum or weight).
+pub const BV_LIMIT: usize = BV_MINSUB_BITS + BV_MINSUB_BITS_COUNT; // 146
+
+/// On the bounds row: the total cost (carried from last field row).
+pub const BV_BOUNDS_COST: usize = BV_LIMIT + 1; // 147
+
+/// On the bounds row: 8-bit decomposition of (num_fields - group_size).
+/// Proves group_size <= num_fields.
+pub const BV_GS_BITS: usize = BV_BOUNDS_COST + 1; // 148
+pub const BV_GS_BITS_COUNT: usize = 8;
+
+/// Flag: 1 if max_value_sum is zero (means no upper bound on cost).
+pub const BV_MAX_SUM_IS_ZERO: usize = BV_GS_BITS + BV_GS_BITS_COUNT; // 156
+
+/// Inverse of max_value_sum (used to prove max_sum_is_zero is correct).
+pub const BV_MAX_SUM_INV: usize = BV_MAX_SUM_IS_ZERO + 1; // 157
+
+/// Flag: 1 on the bounds row (row_idx == NUM_FIELDS), 0 on field rows.
+/// Distinguishes the bounds row from inactive field rows (both have mask=0).
+pub const BV_IS_BOUNDS: usize = BV_MAX_SUM_INV + 1; // 158
 
 // ==========================================================================
 // Total trace width
 // ==========================================================================
 
-/// The widest section (EC) uses 178 columns, plus IS_EC and IS_P2 = 180.
-pub const TRACE_WIDTH: usize = IS_P2 + 1; // 180
+/// The widest section (EC) uses 178 columns, plus IS_EC, IS_P2, IS_BV = 181.
+pub const TRACE_WIDTH: usize = IS_BV + 1; // 181
 
 // ==========================================================================
 // Helpers

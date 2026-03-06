@@ -77,7 +77,20 @@ fn test_ballot_wrong_vote_fails() {
         process_id: [Goldilocks::from_u64(1001), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
         address: [Goldilocks::from_u64(0xDEADBEEF), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
         weight: Goldilocks::from_u64(1),
-        packed_ballot_mode: [Goldilocks::ZERO; 4],
+        packed_ballot_mode: {
+            use davinci_stark::trace::BallotMode;
+            BallotMode {
+                num_fields: 8,
+                group_size: 8,
+                unique_values: 0,
+                cost_from_weight: 0,
+                cost_exponent: 1,
+                max_value: 16,
+                min_value: 0,
+                max_value_sum: 200,
+                min_value_sum: 0,
+            }.pack()
+        },
     };
 
     let (trace, correct_pv, _) = generate_full_ballot_trace(&inputs);
@@ -130,12 +143,20 @@ fn test_full_8field_ballot_proof() {
             Goldilocks::from_u64(0),
         ],
         weight: Goldilocks::from_u64(1),
-        packed_ballot_mode: [
-            Goldilocks::from_u64(0),
-            Goldilocks::from_u64(0),
-            Goldilocks::from_u64(0),
-            Goldilocks::from_u64(0),
-        ],
+        packed_ballot_mode: {
+            use davinci_stark::trace::BallotMode;
+            BallotMode {
+                num_fields: 5,
+                group_size: 5,
+                unique_values: 0,
+                cost_from_weight: 0,
+                cost_exponent: 2,
+                max_value: 16,
+                min_value: 0,
+                max_value_sum: 100,
+                min_value_sum: 0,
+            }.pack()
+        },
     };
 
     println!("Generating 8-field ballot trace...");
@@ -181,4 +202,67 @@ fn test_full_8field_ballot_proof() {
     println!("  Trace gen: {:?}", trace_time);
     println!("  Prove:     {:?}", prove_time);
     println!("  Verify:    {:?}", verify_time);
+}
+
+/// Test with the exact webapp default config (group_size=1, max_sum=1125, min_sum=5).
+#[test]
+fn test_webapp_defaults() {
+    use davinci_stark::trace::{generate_full_ballot_trace, BallotInputs, BallotMode};
+    use davinci_stark::air::NUM_FIELDS;
+
+    let sk = Scalar([12345, 0, 0, 0, 0]);
+    let pk = Point::mulgen(sk);
+
+    let inputs = BallotInputs {
+        k: Scalar([42, 0, 0, 0, 0]),
+        fields: [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([4, 0, 0, 0, 0]),
+            Scalar([5, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        pk,
+        process_id: [
+            Goldilocks::from_u64(1001),
+            Goldilocks::from_u64(0),
+            Goldilocks::from_u64(0),
+            Goldilocks::from_u64(0),
+        ],
+        address: [
+            Goldilocks::from_u64(3735928559),
+            Goldilocks::from_u64(0),
+            Goldilocks::from_u64(0),
+            Goldilocks::from_u64(0),
+        ],
+        weight: Goldilocks::from_u64(1),
+        packed_ballot_mode: BallotMode {
+            num_fields: 5,
+            group_size: 1,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 2,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 1125,
+            min_value_sum: 5,
+        }.pack(),
+    };
+
+    println!("Generating webapp-defaults ballot trace...");
+    let (trace, pv, _) = generate_full_ballot_trace(&inputs);
+
+    let config = make_config();
+    let var_len_pis: Vec<&[&[Val]]> = vec![];
+
+    println!("Proving...");
+    let proof = prove(&config, &BallotAir::new(), &trace, &pv);
+
+    println!("Verifying...");
+    verify(&config, &BallotAir::new(), &proof, &pv, &var_len_pis)
+        .expect("Webapp-defaults verification failed");
+    println!("✅ Webapp-defaults test passed!");
 }
