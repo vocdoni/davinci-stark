@@ -9,8 +9,8 @@
 //!   - make_verifier_config(): uses a dummy RNG (verifier never blinds)
 //!
 //! The FRI parameters target ~100-bit security:
-//!   - log_blowup=3 (blowup factor 8, minimum for degree-7 constraints)
-//!   - num_queries=28 (28 x 3 = 84 bits from query soundness)
+//!   - log_blowup=2 (blowup factor 4, sufficient for max constraint degree 4)
+//!   - num_queries=42 (42 x 2 = 84 bits from query soundness)
 //!   - proof_of_work_bits=16 (adds 16 bits, reaching 100 total)
 //!
 //! Note: We ship a patched p3-challenger that fixes the PoW grinding bug on
@@ -99,9 +99,14 @@ pub type BallotConfig = StarkConfig<Pcs, Challenge, Challenger>;
 /// hiding codewords are unpredictable. This is essential for zero-knowledge.
 ///
 /// FRI parameters are set for ~100-bit security:
-/// - log_blowup=3 (blowup factor 8, needed for degree-7 constraints)
-/// - num_queries=28 (84 bits from query soundness)
+/// - log_blowup=2 (blowup factor 4, sufficient for max constraint degree 4)
+/// - num_queries=42 (42 x 2 = 84 bits from query soundness)
 /// - proof_of_work_bits=16 (adds 16 bits → 100 total, ~65K hash trials)
+///
+/// The degree-4 budget was achieved by storing Poseidon2 x7 S-box outputs
+/// and BV accumulator intermediates as trace columns, reducing the previous
+/// degree-7 constraints down to degree 4. This halved the extended domain
+/// (from 8× to 4× blowup), dramatically improving proving performance.
 pub fn make_prover_config() -> SyncBallotConfig {
     let seed = entropy_seed();
     make_config_with_rng_seed(seed)
@@ -130,9 +135,9 @@ fn make_config_with_rng_seed(blinding_seed: u64) -> SyncBallotConfig {
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
     let fri_params = FriParameters {
-        log_blowup: 3,
+        log_blowup: 2,
         log_final_poly_len: 0,
-        num_queries: 28,
+        num_queries: 42,
         proof_of_work_bits: 16,
         mmcs: challenge_mmcs,
         log_folding_factor: 1,

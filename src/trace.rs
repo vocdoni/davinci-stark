@@ -636,6 +636,13 @@ pub fn fill_poseidon2_rows(
             row[P2_SBOX_X2 + i] = x2;
             row[P2_SBOX_X3 + i] = x3;
             row[P2_SBOX_X6 + i] = x6;
+            // x7 = x3^2 * x6 = (x2^2)^2 * (x2 * x2^2) = x2^7
+            let x7 = if is_full || i == 0 {
+                x3 * x3 * x6
+            } else {
+                Goldilocks::ZERO
+            };
+            row[P2_SBOX_X7 + i] = x7;
         }
 
         // Section flags
@@ -838,6 +845,11 @@ pub fn fill_ballot_validation_rows(
             row[BV_EXP_BITS + k] = g(exp_bits[k]);
             row[BV_SQ + k] = g(sq[k]);
             row[BV_ACC + k] = g(acc[k]);
+        }
+        // acc_x_eb[k] = acc[k-1] * exp_bits[k] (intermediates for degree reduction)
+        for k in 1..8usize {
+            let inter = acc[k - 1].wrapping_mul(exp_bits[k]) % p;
+            row[BV_ACC_INTER + (k - 1)] = g(inter);
         }
         row[BV_POWER] = g(power);
         row[BV_COST_SUM] = g(cost_sums[i]);

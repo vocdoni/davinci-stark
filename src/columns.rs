@@ -150,17 +150,19 @@ pub const P2_PERM_ID: usize = 10;
 /// S-box intermediate columns for degree reduction.
 ///
 /// Computing x^7 directly would be degree 7 and, combined with the IS_P2
-/// gating flag, would push total constraint degree above 7. Instead we
-/// decompose the S-box into stored intermediates:
+/// gating flag, would push total constraint degree above our budget.
+/// We decompose the S-box into stored intermediates:
 ///   x2[i] = state[i] + round_constant  (the "activated" input)
-///   x3[i] = x2[i]^2
-///   x6[i] = x2[i] * x3[i]             (= x2^3)
-///   x7    = x3[i]^2 * x6[i]           (computed inline, degree 3)
-/// The inline x7 computation keeps the max constraint degree at
-/// 3 (x7) * 2 (gating) + 1 = 7.
+///   x3[i] = x2[i]^2                    (stored, verified at degree 2)
+///   x6[i] = x2[i] * x3[i]             (stored, verified at degree 2)
+///   x7[i] = x3[i]^2 * x6[i]           (stored, verified at degree 3)
+///
+/// Storing x7 keeps the max constraint degree at 4 (= 3 + 1 for gating),
+/// which allows log_blowup=2 (4× domain) instead of 3 (8× domain).
 pub const P2_SBOX_X2: usize = 11; // 8 columns (11..18)
 pub const P2_SBOX_X3: usize = 19; // 8 columns (19..26)
 pub const P2_SBOX_X6: usize = 27; // 8 columns (27..34)
+pub const P2_SBOX_X7: usize = 35; // 8 columns (35..42)
 
 // ==========================================================================
 // Ballot validation columns (active when IS_BV = 1)
@@ -278,6 +280,14 @@ pub const BV_MAX_SUM_INV: usize = BV_MAX_SUM_IS_ZERO + 1; // 157
 /// Flag: 1 on the bounds row (row_idx == NUM_FIELDS), 0 on field rows.
 /// Distinguishes the bounds row from inactive field rows (both have mask=0).
 pub const BV_IS_BOUNDS: usize = BV_MAX_SUM_INV + 1; // 158
+
+/// Intermediate products for binary exponentiation accumulator.
+///
+/// Storing acc_x_eb[k] = acc[k-1] * exp_bit[k] reduces the accumulator
+/// constraint degree from 5 to 4, enabling log_blowup=2.
+/// 7 columns for k=1..7 (k=0 doesn't need an intermediate).
+pub const BV_ACC_INTER: usize = BV_IS_BOUNDS + 1; // 159
+pub const BV_ACC_INTER_COUNT: usize = 7; // columns 159..165
 
 // ==========================================================================
 // Total trace width

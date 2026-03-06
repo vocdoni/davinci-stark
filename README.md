@@ -257,10 +257,10 @@ the EC section from 7,656 rows to **1,536 rows** (24 muls × 64 bits).
 | Added point + intermediates | 70 | Point addition result + 10 GF(p^5) products |
 | Phase ID, IS_LAST, IS_EC, IS_P2 | 4 | Metadata and section flags |
 
-**Constraints per row (degree ≤ 7):**
+**Constraints per row (degree ≤ 4):**
 - Point doubling: 9 GF(p^5) product verifications
 - Point addition: 10 GF(p^5) product verifications
-- Accumulator transition: `next.ACC = bit ? ADD : DBL` (multiplexer, degree 3 × gate 2 = 5)
+- Accumulator transition: `next.ACC = bit ? ADD : DBL` (multiplexer, degree 3 × gate 1 = 4)
 - Bit is binary: `BIT × (1 - BIT) = 0`
 - Base point continuity within a scalar mul phase
 
@@ -281,16 +281,21 @@ After each round, a linear mixing layer is applied:
 (e.g., Gröbner basis, interpolation attacks). 8 full + 22 partial rounds is the standard
 parameterization for Goldilocks with security margin > 2.
 
-**S-box degree decomposition**: The S-box computes x^7. To keep constraint degree within our
-blowup budget (degree 7, needed for FRI blowup factor 8), we decompose the computation and
-store intermediates:
+**S-box degree decomposition**: The S-box computes x^7. We decompose the computation and
+store intermediates as trace columns, keeping the maximum constraint degree at 4 (which
+allows a FRI blowup factor of just 4 instead of 8):
 
 ```
 x2 = x + round_constant    (degree 1, stored in trace)
 x3 = x2²                   (degree 2, constrained)
 x6 = x2 × x3               (degree 3, constrained)
-x7 = x3² × x6              (degree 3, computed inline during constraint evaluation)
+x7 = x3² × x6              (degree 3, stored as trace column)
 ```
+
+The key optimization: x7 is stored as a trace column (degree 1 when read) and verified
+via `gate × (x7 - x3² × x6)` at degree 4. The transition constraints use x7 directly
+for the linear mixing layer, keeping full_next at degree 1 (linear in stored columns).
+This avoids the degree-5 blow-up that would occur from `gate × is_full × x3² × x6`.
 
 **Hash computations:**
 
@@ -329,7 +334,8 @@ only 9 rows by packing all checks densely.
 - **Lower bound**: `cost_sum ≥ min_value_sum` via 63-bit decomposition.
 - **Group size**: `group_size ≤ num_fields` via 8-bit decomposition.
 
-**Maximum constraint degree**: 6 (uniqueness: `gate × mask × unique × (diff² × inv - diff)`).
+**Maximum constraint degree**: 4. The BV accumulator uses stored intermediate columns
+(`acc_x_eb = prev_acc × exp_bit`) to keep the degree within budget.
 
 ### Public values (9 Goldilocks elements)
 
@@ -444,8 +450,8 @@ produces proof bytes but verification fails with `OodEvaluationMismatch`.
 
 | Parameter | Value | Notes |
 |---|---|---|
-| FRI blowup | 8 (log₂ = 3) | Minimum for degree-7 constraints |
-| FRI queries | 28 | 84 bits from query soundness (28 × 3) |
+| FRI blowup | 4 (log₂ = 2) | Sufficient for max constraint degree 4 |
+| FRI queries | 42 | 84 bits from query soundness (42 × 2) |
 | Proof-of-work bits | 16 | 16 bits from PoW grinding |
 | Blinding codewords | 1 | Sufficient for zero-knowledge |
 | Extension degree | 2 | Quadratic extension (~128-bit field security) |
@@ -455,8 +461,8 @@ produces proof bytes but verification fails with `OodEvaluationMismatch`.
 
 FRI (Fast Reed-Solomon IOP of Proximity) proves that a committed function is close to a
 low-degree polynomial. The verifier samples random query positions and checks consistency.
-Each query provides `log₂(blowup_factor)` bits of security. With 28 queries and blowup
-factor 8, we get 28 × 3 = 84 bits.
+Each query provides `log₂(blowup_factor)` bits of security. With 42 queries and blowup
+factor 4, we get 42 × 2 = 84 bits.
 
 **Proof-of-work** adds additional security cheaply: the prover must find a nonce such that
 the hash of the transcript has 16 leading zero bits. This costs ~65K hash evaluations
@@ -527,8 +533,9 @@ already correct on 64-bit targets).
 2. **ecgfp5 curve**: Group order is approximately 2^319, providing ~160-bit discrete log
    security. This exceeds our 100-bit proof security target.
 
-3. **Poseidon2**: Width 8, degree 7, 30 rounds (8 full + 22 partial). Constants are the
-   published Horizen Labs values used by Zisk, not randomly generated.
+3. **Poseidon2**: Width 8, S-box degree 7 (x^7), 30 rounds (8 full + 22 partial). S-box
+   outputs are stored as trace columns to keep AIR constraint degree at 4. Constants are
+   the published Horizen Labs values used by Zisk, not randomly generated.
 
 4. **Blinding RNG**: Seeded from system entropy (`getrandom` → `crypto.getRandomValues()`
    on WASM). Each proof gets a fresh unpredictable seed. The RNG is a SplitMix64 PRNG
@@ -583,11 +590,12 @@ This project uses Poseidon2 in two separate contexts:
 | Metric | Value | Notes |
 |---|---|---|
 | Trace size | 4,096 × 181 | Padded to next power of 2 |
-| Native prove time | ~3.8s | Release mode, single-threaded, 100-bit security |
+| Max constraint degree | 4 | Stored x7 columns + BV intermediates |
+| FRI blowup factor | 4 (log₂ = 2) | Halved from 8 via degree reduction |
+| Native prove time | ~3.5s | Release mode, single-threaded, 100-bit security |
 | Native verify time | ~1ms | Release mode |
-| WASM prove time | ~8-10s | Node.js; ~28s in browser Web Worker |
-| WASM binary | 866 KB | Without wasm-opt (disabled due to Table.grow bug) |
-| Proof size | ~430 KB | 28 FRI queries + 16 PoW bits |
+| WASM binary | 900 KB | Without wasm-opt (disabled due to Table.grow bug) |
+| Proof size | ~430 KB | 42 FRI queries + 16 PoW bits |
 
 HidingFriPcs (ZK mode) roughly doubles proving time compared to non-hiding mode because
 the trace polynomial is extended with blinding codewords.

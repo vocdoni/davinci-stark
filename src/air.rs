@@ -423,20 +423,19 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
 /// the current state. We verify this transition when both the current and
 /// next rows are Poseidon2 rows (both_p2 = IS_P2[local] * IS_P2[next]).
 ///
-/// To keep the constraint degree within our blowup budget, the S-box x^7
-/// is decomposed into stored intermediates:
+/// The S-box x^7 is fully decomposed into stored columns:
 ///   x2 = state + round_constant  (written by prover)
-///   x3 = x2^2                    (constrained, degree 2)
-///   x6 = x2 * x3                 (constrained, degree 2)
-///   x7 = x3^2 * x6              (computed inline, degree 3)
+///   x3 = x2^2                    (stored, verified at degree 2)
+///   x6 = x2 * x3                 (stored, verified at degree 2)
+///   x7 = x3^2 * x6              (stored, verified at degree 3)
 ///
-/// For full rounds all 8 elements go through the S-box.
-/// For partial rounds only element 0 does; elements 1-7 pass through unchanged.
-/// The round_type flag (0=full, 1=partial) selects between these two modes.
+/// Storing x7 as a column means the transition constraint (which applies
+/// MDS to x7 values) stays at degree 1 for linear combinations, and the
+/// total constraint degree (with gating) is 4. This enables log_blowup=2.
 ///
-/// Maximum constraint degree:
-///   x7 computation (degree 3) * is_full selector (1) * both_p2 (2) = 6
-///   or with is_partial: state passthrough (1) * partial (1) * both_p2 (2) + similar = 7
+/// Maximum constraint degree: 4
+///   x7 verification: gate(1) * (x7 - x3^2*x6)(3) = degree 4
+///   transition: both_p2(2) * (next_state - linear(x7))(2) = degree 4
 fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
@@ -455,7 +454,7 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
         .map(|i| next[P2_STATE + i].clone().into())
         .collect();
 
-    // S-box intermediates: x2 = s (activated state), x3 = s^2, x6 = s^3
+    // S-box intermediates: x2 = s (activated state), x3 = s^2, x6 = s^3, x7 = s^7
     let x2: Vec<AB::Expr> = (0..poseidon2::WIDTH)
         .map(|i| local[P2_SBOX_X2 + i].clone().into())
         .collect();
@@ -464,6 +463,9 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
         .collect();
     let x6: Vec<AB::Expr> = (0..poseidon2::WIDTH)
         .map(|i| local[P2_SBOX_X6 + i].clone().into())
+        .collect();
+    let x7: Vec<AB::Expr> = (0..poseidon2::WIDTH)
+        .map(|i| local[P2_SBOX_X7 + i].clone().into())
         .collect();
 
     // round_type: 0 = full round, 1 = partial round (binary)
@@ -478,19 +480,21 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
 
     // ============================================================
     // S-box intermediate constraints
-    // x2[i] = s_i (prover fills with state[i] + round_constant[i])
-    // x3[i] = s_i^2 for active elements, 0 for inactive
-    // x6[i] = s_i^3 for active elements, 0 for inactive
+    // x3[i] = x2[i]^2, x6[i] = x2[i]*x3[i], x7[i] = x3[i]^2*x6[i]
+    // All gated by IS_P2. In partial rounds, elements 1-7 have zero
+    // intermediates (identity passthrough).
+    // Max degree: gate(1) * (x7 - x3^2*x6)(3) = 4
     // ============================================================
     for i in 0..poseidon2::WIDTH {
         if i == 0 {
             // Element 0 always goes through S-box (both full and partial rounds)
-            // x3[0] = x2[0]^2  (degree 2, gated = degree 3)
             builder.assert_zero(gate.clone() * (x3[0].clone() - x2[0].clone() * x2[0].clone()));
-            // x6[0] = x2[0] * x3[0]  (degree 2, gated = degree 3)
             builder.assert_zero(gate.clone() * (x6[0].clone() - x2[0].clone() * x3[0].clone()));
+            // x7[0] = x3[0]^2 * x6[0]. Degree: gate(1) * (x3^2*x6)(3) = 4
+            builder.assert_zero(gate.clone() * (x7[0].clone() - x3[0].clone() * x3[0].clone() * x6[0].clone()));
         } else {
-            // Elements 1..7: S-box in full rounds, zero in partial rounds
+            // Elements 1..7: S-box in full rounds, identity in partial rounds.
+            // In partial rounds these constraints force x3[i]=0, x6[i]=0.
             builder.assert_zero(gate.clone() * (
                 is_full.clone() * (x3[i].clone() - x2[i].clone() * x2[i].clone())
                 + is_partial.clone() * x3[i].clone()
@@ -499,24 +503,30 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
                 is_full.clone() * (x6[i].clone() - x2[i].clone() * x3[i].clone())
                 + is_partial.clone() * x6[i].clone()
             ));
+            // x7[i] = x3[i]^2 * x6[i]. No is_full selector needed because in
+            // partial rounds x3[i]=x6[i]=0 (forced above), so x3^2*x6=0 and
+            // the constraint reduces to x7[i]=0 automatically.
+            // Degree: gate(1) * (x3^2*x6)(3) = 4 (not 5!)
+            builder.assert_zero(gate.clone() * (x7[i].clone() - x3[i].clone() * x3[i].clone() * x6[i].clone()));
         }
     }
 
     // ============================================================
     // State transition: next_state = linear_layer(sbox_outputs)
+    //
+    // To keep the constraint degree ≤ 4, we compute full_next from x7 columns
+    // directly (degree 1) rather than from sbox_out (which would be degree 2
+    // due to the is_full*x7+is_partial*state multiplexer).
+    //
+    // Degree analysis:
+    //   full_next = linear(x7[0..7]) → degree 1
+    //   partial_next = linear(x7[0], state[1..7]) → degree 1
+    //   expected = is_full(1) * full_next(1) + is_partial(1) * partial_next(1) → degree 2
+    //   both_p2(2) * (next_state(1) - expected(2)) → degree 4 ✓
     // ============================================================
-    // x7[i] = x3[i]^2 * x6[i]  (= (s^2)^2 * s^3 = s^4 * s^3 = s^7), degree 3
-    let mut x7 = Vec::with_capacity(poseidon2::WIDTH);
-    x7.push(x3[0].clone() * x3[0].clone() * x6[0].clone());
-    for i in 1..poseidon2::WIDTH {
-        // is_full * (x3^2 * x6) + is_partial * state[i], degree 4
-        x7.push(
-            is_full.clone() * x3[i].clone() * x3[i].clone() * x6[i].clone()
-            + is_partial.clone() * state[i].clone()
-        );
-    }
 
-    // External linear layer (full rounds): Horizen Labs 4x4 MDS blocks then mix.
+    // External linear layer (full rounds): apply to x7 values directly.
+    // Horizen Labs 4x4 MDS blocks then mix.
     // Matrix: [[5,7,1,3],[4,6,1,1],[1,3,5,7],[1,1,4,6]] (matches Zisk's matmul_m4).
     let mat4 = |a: &AB::Expr, b: &AB::Expr, c: &AB::Expr, d: &AB::Expr| -> [AB::Expr; 4] {
         let t0 = a.clone() + b.clone();
@@ -532,20 +542,22 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
         [t6, t5, t7, t4]
     };
 
-    let b0 = mat4(&x7[0], &x7[1], &x7[2], &x7[3]);
-    let b1 = mat4(&x7[4], &x7[5], &x7[6], &x7[7]);
+    // Full round: linear layer applied to all x7 values (degree 1 each)
+    let fb0 = mat4(&x7[0], &x7[1], &x7[2], &x7[3]);
+    let fb1 = mat4(&x7[4], &x7[5], &x7[6], &x7[7]);
 
     let mut full_next = Vec::with_capacity(poseidon2::WIDTH);
     for i in 0..4 {
-        let sum = b0[i].clone() + b1[i].clone();
-        full_next.push(b0[i].clone() + sum.clone());
+        let sum = fb0[i].clone() + fb1[i].clone();
+        full_next.push(fb0[i].clone() + sum.clone());
     }
     for i in 0..4 {
-        let sum = b0[i].clone() + b1[i].clone();
-        full_next.push(b1[i].clone() + sum);
+        let sum = fb0[i].clone() + fb1[i].clone();
+        full_next.push(fb1[i].clone() + sum);
     }
 
-    // Internal linear layer (partial rounds):
+    // Internal linear layer (partial rounds): x7[0] is the S-box output,
+    // elements 1-7 pass through unchanged (state[i]).
     let mut partial_sum = x7[0].clone();
     for i in 1..poseidon2::WIDTH {
         partial_sum = partial_sum + state[i].clone();
@@ -564,7 +576,7 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
         let both_p2 = gate.clone() * next_is_p2; // degree 2
 
         for i in 0..poseidon2::WIDTH {
-            // expected degree: is_full(1) * full_next(4) = 5, gated by both_p2(2) = 7
+            // Degree: both_p2(2) * max(is_full(1)*full_next(1), is_partial(1)*partial_next(1)) = 4
             let expected = is_full.clone() * full_next[i].clone()
                 + is_partial.clone() * partial_next[i].clone();
             when_trans.assert_zero(
@@ -724,8 +736,11 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
         let ebk = col(BV_EXP_BITS + k);
         let sqk = col(BV_SQ + k);
         let this_acc = col(BV_ACC + k);
-        let selector = AB::Expr::ONE + ebk.clone() * (sqk.clone() - AB::Expr::ONE);
-        builder.assert_zero(gate.clone() * mask.clone() * (this_acc - prev_acc * selector));
+        let inter = col(BV_ACC_INTER + k - 1); // stored: acc[k-1] * eb[k]
+        // Verify intermediate: inter = prev_acc * ebk (degree 2, gated = 4)
+        builder.assert_zero(gate.clone() * mask.clone() * (inter.clone() - prev_acc.clone() * ebk.clone()));
+        // Accumulator: acc[k] = prev_acc + inter * (sqk - 1) (degree 2, gated = 4)
+        builder.assert_zero(gate.clone() * mask.clone() * (this_acc - prev_acc - inter * (sqk - AB::Expr::ONE)));
     }
 
     // Power result = acc[7]

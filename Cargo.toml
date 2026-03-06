@@ -57,7 +57,7 @@ rand = "0.9"
 p3-challenger = { path = "vendor/p3-challenger" }
 
 [profile.release]
-opt-level = 2
+opt-level = 3
 lto = "thin"
 
 [package.metadata.wasm-pack.profile.release]
