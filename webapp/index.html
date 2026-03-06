@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DAVINCI zkSTARK Ballot Proof</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; background: #0d1117; color: #c9d1d9; }
+    h1 { color: #58a6ff; margin-bottom: 0.5rem; }
+    h3 { color: #8b949e; margin-bottom: 0.5rem; font-size: 0.9rem; }
+    .subtitle { color: #8b949e; margin-bottom: 2rem; font-size: 0.9rem; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; }
+    .card-title { color: #58a6ff; font-size: 1rem; margin-bottom: 1rem; }
+    label { display: block; color: #8b949e; font-size: 0.85rem; margin-bottom: 0.3rem; }
+    input, select { width: 100%; padding: 0.5rem; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-family: monospace; margin-bottom: 0.5rem; }
+    select { appearance: auto; }
+    .fields-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; margin-bottom: 1rem; }
+    .config-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; margin-bottom: 1rem; }
+    .fields-grid input, .config-grid input, .config-grid select { margin-bottom: 0; }
+    .fields-grid label, .config-grid label { font-size: 0.8rem; }
+    .row-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+    button { background: #238636; color: white; border: none; padding: 0.7rem 1.5rem; border-radius: 6px; cursor: pointer; font-size: 1rem; margin-right: 0.5rem; margin-bottom: 0.5rem; }
+    button:hover { background: #2ea043; }
+    button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+    button.secondary { background: #1f6feb; }
+    button.secondary:hover { background: #388bfd; }
+    .btn-small { padding: 0.5rem 0.8rem; font-size: 0.85rem; }
+    .log { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 1rem; font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
+    .proof-data { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 1rem; font-family: monospace; font-size: 0.75rem; white-space: pre-wrap; max-height: 200px; overflow-y: auto; word-break: break-all; color: #8b949e; }
+    .success { color: #3fb950; }
+    .error { color: #f85149; }
+    .info { color: #58a6ff; }
+    .timing { color: #d2a8ff; }
+    .k-row { display: flex; gap: 0.5rem; align-items: flex-end; margin-bottom: 0.5rem; }
+    .k-row input { flex: 1; margin-bottom: 0; }
+    .k-row button { margin: 0; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+  <h1>🗳️ DAVINCI zkSTARK Ballot Proof</h1>
+  <p class="subtitle">8-field ElGamal encryption + Poseidon2 hashing over ecgfp5/Goldilocks — Plonky3 STARK</p>
+
+  <!-- Primary Inputs -->
+  <div class="card">
+    <div class="card-title">📝 Vote Inputs</div>
+
+    <label>Vote Choices (comma-separated, e.g. "1, 2, 3, 4, 5")</label>
+    <input id="vote_choices" value="1, 2, 3, 4, 5" placeholder="Comma-separated vote values">
+
+    <div class="row-2col">
+      <div>
+        <label>Weight</label>
+        <input id="weight" type="number" value="1" min="0">
+      </div>
+      <div>
+        <label>Process ID (hex or decimal)</label>
+        <input id="process_id" value="1001" placeholder="Process ID">
+      </div>
+    </div>
+
+    <div class="row-2col">
+      <div>
+        <label>Address (hex or decimal)</label>
+        <input id="address" value="3735928559" placeholder="Voter address">
+      </div>
+      <div>
+        <label>Random K</label>
+        <div class="k-row">
+          <input id="k" value="" placeholder="Auto-generated if empty">
+          <button class="btn-small" onclick="genRandomK()">Gen</button>
+        </div>
+      </div>
+    </div>
+
+    <label>Secret Key (hex)</label>
+    <input id="sk" value="000000000000000000000000000000000000000000000000000000000000003039" placeholder="Secret key hex">
+  </div>
+
+  <!-- Ballot Configuration -->
+  <div class="card">
+    <div class="card-title">⚙️ Ballot Configuration</div>
+    <div class="config-grid">
+      <div>
+        <label>Unique Values</label>
+        <select id="unique_values"><option value="0">0 (No)</option><option value="1">1 (Yes)</option></select>
+      </div>
+      <div>
+        <label>Max Value</label>
+        <input id="max_value" type="number" value="16" min="0">
+      </div>
+      <div>
+        <label>Min Value</label>
+        <input id="min_value" type="number" value="0" min="0">
+      </div>
+      <div>
+        <label>Cost Exponent</label>
+        <input id="cost_exponent" type="number" value="2" min="0">
+      </div>
+      <div>
+        <label>Max Value Sum</label>
+        <input id="max_value_sum" type="number" value="1125" min="0">
+      </div>
+      <div>
+        <label>Min Value Sum</label>
+        <input id="min_value_sum" type="number" value="5" min="0">
+      </div>
+      <div>
+        <label>Cost From Weight</label>
+        <select id="cost_from_weight"><option value="0">0 (No)</option><option value="1">1 (Yes)</option></select>
+      </div>
+      <div>
+        <label>Capacity</label>
+        <input id="capacity" type="number" value="8" disabled>
+      </div>
+      <div>
+        <label>Group Size</label>
+        <input id="group_size" type="number" value="1" min="1">
+      </div>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="card">
+    <button id="btn-prove" onclick="doProve()">Compute Inputs & Generate Proof</button>
+    <button id="btn-verify" class="secondary" onclick="doVerify()" disabled>Verify Proof</button>
+  </div>
+
+  <!-- Log Output -->
+  <div class="card">
+    <div class="card-title">📋 Logs</div>
+    <div id="log" class="log">Initializing WASM in Web Worker...</div>
+  </div>
+
+  <!-- Proof Data -->
+  <div class="card" id="proof-card" style="display:none;">
+    <div class="card-title">🔐 Proof Data</div>
+    <div id="proof-data" class="proof-data"></div>
+  </div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
