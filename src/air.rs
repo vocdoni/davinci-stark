@@ -70,8 +70,8 @@ pub const PV_VOTE_ID: usize = 8;
 pub const PV_COUNT: usize = 9;
 
 /// BallotAir holds the Poseidon2 round constants that the constraint evaluator
-/// needs. These must match exactly what the trace generator used, so both sides
-/// derive them from the same seed (42).
+/// needs. These must match exactly what the trace generator used (hardcoded
+/// Zisk-compatible constants).
 pub struct BallotAir {
     pub p2_constants: poseidon2::Poseidon2Constants,
 }
@@ -79,7 +79,7 @@ pub struct BallotAir {
 impl BallotAir {
     pub fn new() -> Self {
         Self {
-            p2_constants: poseidon2::Poseidon2Constants::from_seed(42),
+            p2_constants: poseidon2::Poseidon2Constants::new(),
         }
     }
 }
@@ -516,19 +516,20 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
         );
     }
 
-    // External linear layer (full rounds): mat4 blocks then mix
+    // External linear layer (full rounds): Horizen Labs 4x4 MDS blocks then mix.
+    // Matrix: [[5,7,1,3],[4,6,1,1],[1,3,5,7],[1,1,4,6]] (matches Zisk's matmul_m4).
     let mat4 = |a: &AB::Expr, b: &AB::Expr, c: &AB::Expr, d: &AB::Expr| -> [AB::Expr; 4] {
-        let t01 = a.clone() + b.clone();
-        let t23 = c.clone() + d.clone();
-        let t0123 = t01.clone() + t23.clone();
-        let t01123 = t0123.clone() + b.clone();
-        let t01233 = t0123 + d.clone();
-        [
-            t01123.clone() + t01,
-            t01123 + c.double(),
-            t01233.clone() + t23,
-            t01233 + a.double(),
-        ]
+        let t0 = a.clone() + b.clone();
+        let t1 = c.clone() + d.clone();
+        let t2 = b.clone() + b.clone() + t1.clone();     // 2b + c + d
+        let t3 = d.clone() + d.clone() + t0.clone();     // a + b + 2d
+        let t1_2 = t1.clone() + t1;                       // 2c + 2d
+        let t0_2 = t0.clone() + t0;                       // 2a + 2b
+        let t4 = t1_2.clone() + t1_2 + t3.clone();       // a + b + 4c + 6d
+        let t5 = t0_2.clone() + t0_2 + t2.clone();       // 4a + 6b + c + d
+        let t6 = t3 + t5.clone();                          // 5a + 7b + c + 3d
+        let t7 = t2 + t4.clone();                          // a + 3b + 5c + 7d
+        [t6, t5, t7, t4]
     };
 
     let b0 = mat4(&x7[0], &x7[1], &x7[2], &x7[3]);

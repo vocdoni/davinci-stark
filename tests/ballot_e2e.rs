@@ -266,3 +266,58 @@ fn test_webapp_defaults() {
         .expect("Webapp-defaults verification failed");
     println!("✅ Webapp-defaults test passed!");
 }
+
+/// Test that an out-of-range ballot (field values > max_value) is rejected by the verifier.
+///
+/// This confirms that the BV range-check constraints work: the prover CAN produce bytes
+/// from an invalid trace (STARKs don't prevent this), but verify() must return Err.
+#[test]
+fn test_out_of_range_ballot_rejected() {
+    use davinci_stark::trace::{generate_full_ballot_trace, BallotInputs, BallotMode};
+    use davinci_stark::air::NUM_FIELDS;
+
+    let sk = Scalar([12345, 0, 0, 0, 0]);
+    let pk = Point::mulgen(sk);
+
+    let inputs = BallotInputs {
+        k: Scalar([42, 0, 0, 0, 0]),
+        fields: [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]), // INVALID: > max_value=2
+            Scalar([4, 0, 0, 0, 0]), // INVALID
+            Scalar([5, 0, 0, 0, 0]), // INVALID
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        pk,
+        process_id: [Goldilocks::from_u64(1001), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
+        address: [Goldilocks::from_u64(0xDEADBEEF), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
+        weight: Goldilocks::from_u64(1),
+        packed_ballot_mode: BallotMode {
+            num_fields: 5,
+            group_size: 1,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 2,
+            max_value: 2,    // Only 0, 1, 2 are valid choices
+            min_value: 0,
+            max_value_sum: 0,
+            min_value_sum: 0,
+        }.pack(),
+    };
+
+    let (trace, pv, _) = generate_full_ballot_trace(&inputs);
+
+    let config = make_config();
+    let var_len_pis: Vec<&[&[Val]]> = vec![];
+
+    println!("Proving invalid ballot (fields 3,4,5 exceed max_value=2)...");
+    let proof = prove(&config, &BallotAir::new(), &trace, &pv);
+    println!("Proof bytes produced. Now verifying (should FAIL)...");
+
+    let result = verify(&config, &BallotAir::new(), &proof, &pv, &var_len_pis);
+    assert!(result.is_err(), "Verification must reject out-of-range ballot, but it passed!");
+    println!("✅ Out-of-range ballot correctly rejected by verifier: {:?}", result.unwrap_err());
+}

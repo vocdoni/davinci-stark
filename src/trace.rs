@@ -277,7 +277,7 @@ pub fn generate_full_ballot_trace(
     inputs: &BallotInputs,
 ) -> (RowMajorMatrix<Goldilocks>, Vec<Goldilocks>, BallotOutputs) {
     let g = Point::GENERATOR;
-    let constants = Poseidon2Constants::from_seed(42);
+    let constants = Poseidon2Constants::new();
 
     // ============================================================
     // Step 1: Derive k-chain via Poseidon2

@@ -50,6 +50,12 @@ console_error_panic_hook = "0.1"
 [dev-dependencies]
 rand = "0.9"
 
+[patch.crates-io]
+# Patch p3-challenger to fix PoW grinding on wasm32:
+# Original code truncates F::ORDER_U64 via `as usize` (32-bit on wasm32 → 1).
+# Our patch does the division in u64 first and clamps to usize::MAX.
+p3-challenger = { path = "vendor/p3-challenger" }
+
 [profile.release]
 opt-level = 2
 lto = "thin"

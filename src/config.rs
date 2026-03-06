@@ -8,12 +8,14 @@
 //!   - make_prover_config(): uses entropy-seeded blinding RNG (for real ZK)
 //!   - make_verifier_config(): uses a dummy RNG (verifier never blinds)
 //!
-//! The FRI parameters target ~84-bit security:
+//! The FRI parameters target ~100-bit security:
 //!   - log_blowup=3 (blowup factor 8, minimum for degree-7 constraints)
 //!   - num_queries=28 (28 x 3 = 84 bits from query soundness)
-//!   - proof_of_work_bits=0 (disabled -- Plonky3 PoW grinding is broken on wasm32
-//!     because F::ORDER_U64 as usize truncates to 1 on 32-bit targets, causing
-//!     the search to try only one candidate and fail)
+//!   - proof_of_work_bits=16 (adds 16 bits, reaching 100 total)
+//!
+//! Note: We ship a patched p3-challenger that fixes the PoW grinding bug on
+//! wasm32. The original code does `F::ORDER_U64 as usize` which truncates
+//! to 1 on 32-bit targets. Our patch divides in u64 first and clamps.
 
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
@@ -96,10 +98,10 @@ pub type BallotConfig = StarkConfig<Pcs, Challenge, Challenger>;
 /// OS entropy (crypto.getRandomValues on WASM, /dev/urandom on Linux) so the
 /// hiding codewords are unpredictable. This is essential for zero-knowledge.
 ///
-/// FRI parameters are set for ~84-bit security:
+/// FRI parameters are set for ~100-bit security:
 /// - log_blowup=3 (blowup factor 8, needed for degree-7 constraints)
 /// - num_queries=28 (84 bits from query soundness)
-/// - proof_of_work_bits=0 (disabled due to Plonky3 wasm32 bug)
+/// - proof_of_work_bits=16 (adds 16 bits → 100 total, ~65K hash trials)
 pub fn make_prover_config() -> SyncBallotConfig {
     let seed = entropy_seed();
     make_config_with_rng_seed(seed)
@@ -131,7 +133,7 @@ fn make_config_with_rng_seed(blinding_seed: u64) -> SyncBallotConfig {
         log_blowup: 3,
         log_final_poly_len: 0,
         num_queries: 28,
-        proof_of_work_bits: 0,
+        proof_of_work_bits: 16,
         mmcs: challenge_mmcs,
         log_folding_factor: 1,
     };
