@@ -5,28 +5,6 @@ protocol. This project replaces the Circom/Groth16 zkSNARK circuit (`davinci-cir
 transparent STARK proof built on [Plonky3](https://github.com/Plonky3/Plonky3), compiled to
 WebAssembly so voters can generate proofs directly in the browser.
 
----
-
-## Table of Contents
-
-- [Background: What is a STARK?](#background-what-is-a-stark)
-- [Why STARKs for voting?](#why-starks-for-voting)
-- [What this project does](#what-this-project-does)
-- [Architecture](#architecture)
-- [The STARK Circuit](#the-stark-circuit)
-- [Zero-Knowledge: hiding private inputs](#zero-knowledge-hiding-private-inputs)
-- [Verification](#verification)
-- [Security parameters](#security-parameters)
-- [Zisk compatibility](#zisk-compatibility)
-- [Performance](#performance)
-- [Comparison with davinci-circom](#comparison-with-davinci-circom)
-- [Project structure](#project-structure)
-- [Dependencies](#dependencies)
-- [Building and running](#building-and-running)
-- [References](#references)
-
----
-
 ## Background: What is a STARK?
 
 A **STARK** (Scalable Transparent ARgument of Knowledge) is a type of zero-knowledge proof
@@ -68,18 +46,6 @@ proof in milliseconds without ever seeing the vote choices.
 | **Transparency** | No trusted setup ceremony required (unlike Groth16/SNARKs) |
 | **Succinctness** | Verification is much faster than re-running the computation |
 | **Post-quantum** | Based on hash functions and information-theoretic arguments, not elliptic curve pairings |
-
-### STARK vs SNARK
-
-The previous circuit (`davinci-circom`) used **Groth16**, a zkSNARK. SNARKs produce tiny
-proofs (~200 bytes) and verify in ~5ms, but they require a **trusted setup ceremony** -- a
-multi-party computation that, if compromised, would allow proof forgery. STARKs avoid this
-entirely: their security relies only on the collision resistance of hash functions.
-
-The trade-off is proof size: our STARK proofs are ~430 KB vs ~200 bytes for Groth16. For a
-voting protocol where proofs are submitted once and verified server-side, this is acceptable.
-
----
 
 ## Why STARKs for voting?
 
@@ -176,8 +142,6 @@ non-native field emulation.
 The curve is a Jacobi quartic with ~319-bit group order, providing ~160-bit discrete log
 security. Each GF(p^5) element is stored as 5 Goldilocks limbs, so a curve point in
 extended coordinates (X:Z:U:T) uses 20 columns.
-
----
 
 ## The STARK Circuit
 
@@ -379,8 +343,6 @@ Bits [122:185] max_value_sum     (63-bit upper bound on total cost)
 Bits [185:248] min_value_sum     (63-bit lower bound on total cost)
 ```
 
----
-
 ## Zero-Knowledge: hiding private inputs
 
 A standard (non-hiding) STARK reveals actual trace values at the positions queried by
@@ -404,8 +366,6 @@ We use **HidingFriPcs** from Plonky3 to achieve real zero-knowledge:
 Without HidingFriPcs, the 28 FRI query positions would each reveal 181 Goldilocks field
 elements of the actual execution trace. With it, the verifier sees only random-looking
 values that satisfy the constraint checks but reveal nothing about the private inputs.
-
----
 
 ## Verification
 
@@ -443,8 +403,6 @@ from an invalid trace -- it just commits to polynomials via Merkle trees. Howeve
 verifier will detect constraint violations and reject the proof. In our tests,
 `test_out_of_range_ballot_rejected` confirms that a ballot with `field=5, max_value=2`
 produces proof bytes but verification fails with `OodEvaluationMismatch`.
-
----
 
 ## Security parameters
 
@@ -548,8 +506,6 @@ already correct on 64-bit targets).
 - Vote field values must fit in 48 bits (`max_value < 2^48`).
 - Scalar muls use 64-bit keys (derived from the master key via Poseidon2).
 
----
-
 ## Zisk compatibility
 
 The Poseidon2 implementation in this project uses the **exact same parameters** as the
@@ -583,8 +539,6 @@ This project uses Poseidon2 in two separate contexts:
    Uses Plonky3's built-in `Poseidon2Goldilocks<16>`. These are internal to the proof system
    and do not need to match Zisk.
 
----
-
 ## Performance
 
 | Metric | Value | Notes |
@@ -599,8 +553,6 @@ This project uses Poseidon2 in two separate contexts:
 
 HidingFriPcs (ZK mode) roughly doubles proving time compared to non-hiding mode because
 the trace polynomial is extended with blinding codewords.
-
----
 
 ## Comparison with davinci-circom
 
@@ -617,8 +569,6 @@ the trace polynomial is extended with blinding codewords.
 | Post-quantum | No (relies on pairing assumptions) | Plausibly yes (hash-based) |
 | Aggregation | Not natively supported | FRI-based recursion via Zisk zkVM |
 | Language | Circom DSL | Rust (AIR constraints) |
-
----
 
 ## Project structure
 
@@ -657,11 +607,6 @@ davinci-stark/
 ├── Makefile              Build commands (build, test, serve, clean)
 └── README.md             This file
 ```
-
-**~4,600 lines of Rust** in `src/`, plus **23 tests** (5 ballot E2E, 2 EC, 2 Fibonacci,
-3 GF(p^5), 7 Poseidon2 STARK, 4 Poseidon2 unit).
-
----
 
 ## Dependencies
 
