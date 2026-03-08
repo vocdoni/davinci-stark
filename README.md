@@ -19,7 +19,7 @@ proof in milliseconds without ever seeing the vote choices.
 
 1. **Execution trace**: The computation is laid out as a 2D matrix. Each row represents a
    step of the computation, each column represents a register. For our ballot proof, this is
-   a 4,096 × 181 matrix over the Goldilocks field.
+   a 4,096 × 271 matrix over the Goldilocks field.
 
 2. **AIR constraints**: An Algebraic Intermediate Representation (AIR) defines polynomial
    equations that every pair of consecutive rows must satisfy. For example, "the next row's
@@ -89,7 +89,7 @@ This project implements all of these checks as AIR constraints in a Plonky3 STAR
 
 ### What kind of STARK are we using?
 
-We use **Plonky3** (specifically the `p3-miden-*` fork at v0.4.2), which implements a
+We use **upstream Plonky3** (`p3-air`, `p3-uni-stark`, `p3-fri` at v0.4.2), which implements a
 **uni-variate STARK over the Goldilocks field** with FRI-based polynomial commitment.
 
 Key architectural choices:
@@ -118,7 +118,7 @@ Key architectural choices:
 
 | Component | Implementation | Details |
 |---|---|---|
-| STARK prover/verifier | Plonky3 `p3-miden-prover` v0.4.2 | Uni-variate FRI-based STARK |
+| STARK prover/verifier | Plonky3 `p3-uni-stark` v0.4.2 | Uni-variate FRI-based STARK |
 | Polynomial commitment | HidingFriPcs (FRI + blinding) | ZK = true, entropy-seeded RNG |
 | Hash (ballot circuit) | Poseidon2 width-8 | Zisk-compatible (Horizen Labs constants) |
 | Hash (STARK infra) | Poseidon2 width-16 | Merkle tree hashing, Fiat-Shamir |
@@ -148,7 +148,7 @@ extended coordinates (X:Z:U:T) uses 20 columns.
 ### How the circuit is built
 
 Rather than using a high-level circuit DSL, we write the AIR constraints directly in Rust
-using Plonky3's `MidenAirBuilder` API. This gives us full control over the trace layout,
+using Plonky3's `AirBuilder` API. This gives us full control over the trace layout,
 constraint degree, and column reuse.
 
 The process:
@@ -161,13 +161,17 @@ The process:
    consecutive rows of the trace. The Plonky3 prover evaluates these constraints
    symbolically and proves (via FRI) that they hold everywhere.
 
-3. **Public values**: 9 Goldilocks elements (inputs_hash, address, vote_id) are exposed
-   to the verifier. These are checked via "boundary constraints" that pin specific trace
-   values to the public outputs.
+3. **Public values**: 9 Goldilocks elements (`inputs_hash`, `address`, `vote_id`) are exposed
+   to the verifier. These are bound on a dedicated final output row in the trace.
+
+4. **Hidden cross-section bindings**: Additional private columns replicate the derived
+   `k_i` values and ballot field values across the trace. The AIR binds Poseidon outputs,
+   EC scalar bits, and ballot-validation rows to those shared hidden values so the proof
+   describes one ballot statement rather than three locally valid subtraces.
 
 ### Trace layout
 
-The execution trace is a **4,096 × 181 matrix** over Goldilocks. Rows are divided into
+The execution trace is a **4,096 × 271 matrix** over Goldilocks. Rows are divided into
 three sections using binary flag columns (`IS_EC`, `IS_P2`, `IS_BV`):
 
 ```
@@ -185,15 +189,24 @@ Row 0                                                Row 4095
 │  8 per-field rows + 1 bounds row = 9 rows                  │
 │  → Range checks, uniqueness, cost bounds                   │
 ├─────────────────────────────────────────────────────────────┤
+│  Final output row (all flags = 0)                           │
+│  1 row                                                      │
+│  → Public outputs {inputs_hash, address, vote_id}          │
+├─────────────────────────────────────────────────────────────┤
 │  Padding (all flags = 0)                                    │
-│  ~1,280 rows to reach the next power of 2 (4,096)          │
+│  Remaining rows to reach the next power of 2 (4,096)       │
 │  → No constraints fire; filled with neutral EC points       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Column reuse**: The BV section reuses columns 0-177 that the EC and P2 sections use,
-since the sections are mutually exclusive (gated by their IS_* flags). This keeps the
-total width at 181 instead of ~360.
+**Column reuse**: EC, Poseidon2, and BV still reuse the first part of the row layout under
+section gating. The extra width comes from selector bits and hidden linkage columns:
+- Poseidon round selectors
+- BV row selectors
+- EC phase/scalar binding columns
+- hidden global `k_i` values
+- hidden global field values
+- Poseidon `k`-permutation selectors
 
 ### EC Section: ElGamal encryption (24 scalar multiplications)
 
@@ -203,7 +216,9 @@ For each of the 8 vote fields, the circuit performs 3 scalar multiplications:
 2. **S_i = k_i × PK** -- encryption randomness times the election public key
 3. **M_i = field_i × G** -- vote value times the generator
 
-Then **C2_i = M_i + S_i** (verified through the public values / inputs hash).
+Then **C2_i = M_i + S_i**. The ciphertext limbs are included in `inputs_hash`, and the
+underlying `k_i` / `field_i` scalars are now tied to the EC rows through hidden linkage
+columns and scalar-accumulation constraints.
 
 Each scalar mul uses the **double-and-add** algorithm, processing one bit per row.
 The derived keys `k_i` are 64-bit Goldilocks elements (derived from the master key `k`
@@ -219,7 +234,8 @@ the EC section from 7,656 rows to **1,536 rows** (24 muls × 64 bits).
 | Scalar bit | 1 | Current bit of the scalar |
 | Doubled point + intermediates | 65 | Point doubling result + 9 GF(p^5) products |
 | Added point + intermediates | 70 | Point addition result + 10 GF(p^5) products |
-| Phase ID, IS_LAST, IS_EC, IS_P2 | 4 | Metadata and section flags |
+| Phase / bind metadata | 28 | Phase ID, bind flag, scalar accumulator/target, phase selectors |
+| Section flags | 3 | `IS_LAST`, `IS_EC`, `IS_P2` |
 
 **Constraints per row (degree ≤ 4):**
 - Point doubling: 9 GF(p^5) product verifications
@@ -227,6 +243,8 @@ the EC section from 7,656 rows to **1,536 rows** (24 muls × 64 bits).
 - Accumulator transition: `next.ACC = bit ? ADD : DBL` (multiplexer, degree 3 × gate 1 = 4)
 - Bit is binary: `BIT × (1 - BIT) = 0`
 - Base point continuity within a scalar mul phase
+- Phase progression and neutral reset at phase boundaries
+- Scalar-bit accumulation matches the hidden target scalar for that phase
 
 ### Poseidon2 Section: hashing (~1,271 rows)
 
@@ -269,6 +287,9 @@ This avoids the degree-5 blow-up that would occur from `gate × is_full × x3² 
 | Vote ID | (process_id, address, k_limbs) | 2-4 | Unique deterministic voter identifier |
 | Inputs hash | All ballot data (pk, ciphertexts, etc.) | ~28 | Commitment to private data |
 
+For the first 8 permutations (the `k`-derivation chain), the permutation output row is
+also bound to the hidden global `k_i` values used by the EC section.
+
 ### Ballot Validation Section (BV): 9 rows
 
 The BV section implements all the ballot validity rules from the DAVINCI protocol. It occupies
@@ -290,6 +311,10 @@ only 9 rows by packing all checks densely.
 
 - **Cost accumulation**: `cost_sum` transitions across rows, accumulating
   `mask × field^exponent` per active field.
+
+- **Row binding**: one-hot BV row selectors force row order `0..7,8`, identify the
+  unique bounds row, and force the checked field to equal both `BV_FIELDS[row_idx]`
+  and the hidden global field value shared with the EC section.
 
 **Bounds row (row 8):** Checks aggregate ballot cost:
 
@@ -315,6 +340,10 @@ The `inputs_hash` covers: process_id, packed_ballot_mode, pk (20 limbs), address
 vote_id, all 80 ciphertext limbs (C1 and C2 for 8 fields), and weight. This lets the
 verifier check that the proof matches specific election parameters and ciphertexts
 without seeing any private data.
+
+The verifier does not see the hidden linkage columns. They exist only to ensure that:
+- Poseidon-derived `k_i` values are the same scalars used in EC phases `k_i * G` and `k_i * PK`
+- ballot field values checked by BV are the same scalars used in EC phases `field_i * G`
 
 ### Private inputs
 
@@ -360,10 +389,10 @@ We use **HidingFriPcs** from Plonky3 to achieve real zero-knowledge:
    `getrandom`. On WASM this calls `crypto.getRandomValues()`; on native Linux it reads
    `/dev/urandom`. Each proof uses a fresh seed.
 
-3. **Verifier independence**: The verifier never needs the blinding RNG. It uses a fixed
-   dummy seed (the blinding is purely a prover-side concern).
+3. **Verifier independence**: The verifier never generates blinding codewords, so it can
+   reconstruct the STARK configuration with a fixed seed.
 
-Without HidingFriPcs, the 28 FRI query positions would each reveal 181 Goldilocks field
+Without HidingFriPcs, the 34 FRI query positions would each reveal 271 Goldilocks field
 elements of the actual execution trace. With it, the verifier sees only random-looking
 values that satisfy the constraint checks but reveal nothing about the private inputs.
 
@@ -375,11 +404,11 @@ verifier does not need any private inputs or the execution trace.
 ```rust
 use davinci_stark::config::make_verifier_config;
 use davinci_stark::air::BallotAir;
-use p3_miden_prover::verify;
+use p3_uni_stark::verify;
 
 // Deserialize proof and public values from bytes...
 let config = make_verifier_config();
-match verify(&config, &BallotAir::new(), &proof, &public_values, &[]) {
+match verify(&config, &BallotAir::new(), &proof, &public_values) {
     Ok(()) => println!("Valid ballot proof!"),
     Err(e) => println!("Invalid: {:?}", e),
 }
@@ -392,11 +421,12 @@ match verify(&config, &BallotAir::new(), &proof, &public_values, &[]) {
 3. Re-derives all Fiat-Shamir challenges from the proof transcript
 4. Checks the AIR constraints at queried out-of-domain evaluation points
 5. Runs the FRI low-degree test (verifies polynomial consistency)
-6. Checks the proof-of-work witness (16 bits)
-7. Verifies boundary constraints (public values match trace endpoints)
+6. Verifies the hidden cross-section bindings between Poseidon, EC, and BV sections
+7. Verifies the final output-row constraints (public values match trace outputs)
 
 The verifier learns only the 9 public values: the inputs hash (a commitment to all ballot
-data), the voter address, and the vote ID. Everything else stays hidden.
+data), the voter address, and the vote ID. Everything else, including the hidden linkage
+columns, stays hidden.
 
 **Important STARK property**: Unlike SNARKs, the STARK prover *can* produce proof bytes
 from an invalid trace -- it just commits to polynomials via Merkle trees. However, the
@@ -406,30 +436,41 @@ produces proof bytes but verification fails with `OodEvaluationMismatch`.
 
 ## Security parameters
 
+This repository intentionally uses a single proving profile, because proofs are generated
+only in the browser. We do not maintain separate `native` and `browser` security modes.
+
 | Parameter | Value | Notes |
 |---|---|---|
-| FRI blowup | 4 (log₂ = 2) | Sufficient for max constraint degree 4 |
-| FRI queries | 42 | 84 bits from query soundness (42 × 2) |
-| Proof-of-work bits | 16 | 16 bits from PoW grinding |
+| FRI blowup | 8 (`log_blowup = 3`) | Needed by the completed AIR |
+| FRI queries | 34 | `34 x log2(8) = 102` conjectured bits from query soundness |
+| Proof-of-work bits | 0 | Disabled for browser practicality |
 | Blinding codewords | 1 | Sufficient for zero-knowledge |
 | Extension degree | 2 | Quadratic extension (~128-bit field security) |
-| **Total security** | **~100 bits** | **84 (queries) + 16 (PoW), conjectured** |
+| **FRI soundness target** | **~102 bits** | **Conjectured, via the ethSTARK heuristic** |
 
 ### How FRI security works
 
 FRI (Fast Reed-Solomon IOP of Proximity) proves that a committed function is close to a
 low-degree polynomial. The verifier samples random query positions and checks consistency.
-Each query provides `log₂(blowup_factor)` bits of security. With 42 queries and blowup
-factor 4, we get 42 × 2 = 84 bits.
+Each query provides `log2(blowup_factor)` bits of conjectured soundness under the ethSTARK
+heuristic. With blowup factor 8 and 34 queries, the profile used by this repo targets
+roughly `34 x 3 = 102` bits of conjectured soundness without relying on proof-of-work.
 
-**Proof-of-work** adds additional security cheaply: the prover must find a nonce such that
-the hash of the transcript has 16 leading zero bits. This costs ~65K hash evaluations
-(negligible time) but forces an attacker to do 2^16 extra work per forgery attempt.
+This is the statement we rely on for the STARK layer:
+- it is a conjectured soundness estimate, not a formal proof bound
+- it applies to the FRI/query-soundness component of the protocol
+- it is separate from the curve security (`ecgfp5`) and the extension-field size
+
+In other words:
+- `ecgfp5` still has about 160-bit discrete-log security
+- the Goldilocks quadratic extension still gives a 128-bit challenge field
+- the overall proof system is still bottlenecked by the FRI soundness target, so we
+  describe the deployed profile as approximately 102-bit conjectured security
 
 ### Plonky3 PoW Bug on WASM (p3-challenger patch)
 
-> **Bug**: Plonky3 v0.4.2 proof-of-work grinding is broken on `wasm32` targets, making it
-> impossible to generate proofs with `proof_of_work_bits > 0` in the browser.
+> **Note**: This repo still ships a local `p3-challenger` patch for the upstream wasm32
+> proof-of-work grinding bug, but the current browser profile keeps PoW disabled.
 
 **Where**: `p3-challenger-0.4.2/src/grinding_challenger.rs`, line 126.
 
@@ -450,9 +491,9 @@ truncates the 64-bit order to its lower 32 bits, yielding `1` (since the Goldilo
 mod 2^32 = 1). The grinder therefore tries exactly **one batch** (typically 4 candidates)
 and almost certainly fails to find a valid PoW nonce, causing `RuntimeError: unreachable`.
 
-**Why this matters**: Without PoW, the STARK security drops from 100 bits to 84 bits.
-Setting `proof_of_work_bits = 0` works around the crash but weakens security. We need
-PoW to reach our 100-bit target.
+**Why this matters**: If PoW is re-enabled in the future, this patch is still required on
+`wasm32`. The current production profile avoids PoW entirely and instead gets its security
+from `log_blowup = 3` and `num_queries = 34`.
 
 **Fix**: Perform the division in `u64` (where no truncation occurs), then clamp the result
 to `usize::MAX` before converting. This gives up to ~4 billion batches on wasm32, which is
@@ -489,20 +530,23 @@ already correct on 64-bit targets).
    The degree-2 extension provides ~128-bit security against algebraic attacks.
 
 2. **ecgfp5 curve**: Group order is approximately 2^319, providing ~160-bit discrete log
-   security. This exceeds our 100-bit proof security target.
+   security. This exceeds the STARK proof security target.
 
 3. **Poseidon2**: Width 8, S-box degree 7 (x^7), 30 rounds (8 full + 22 partial). S-box
    outputs are stored as trace columns to keep AIR constraint degree at 4. Constants are
    the published Horizen Labs values used by Zisk, not randomly generated.
 
-4. **Blinding RNG**: Seeded from system entropy (`getrandom` → `crypto.getRandomValues()`
+4. **Statement binding**: Security of the ballot statement now relies on the hidden-link
+   columns and their AIR constraints. These bind:
+   - Poseidon `k`-chain outputs to EC `k_i` scalar-mul phases
+   - BV field values to EC `field_i * G` phases
+   - public values to the final output row
+
+5. **Blinding RNG**: Seeded from system entropy (`getrandom` -> `crypto.getRandomValues()`
    on WASM). Each proof gets a fresh unpredictable seed. The RNG is a SplitMix64 PRNG
-   (adequate for a PoC; production should use a CSPRNG).
+   seeded from OS entropy for each proof.
 
-### Restrictions
-
-- The `unsafe impl Sync` on `SyncBallotConfig` is only safe for single-threaded usage.
-  Do not enable the `parallel` Cargo feature without replacing this with proper synchronization.
+Restrictions:
 - Vote field values must fit in 48 bits (`max_value < 2^48`).
 - Scalar muls use 64-bit keys (derived from the master key via Poseidon2).
 
@@ -510,7 +554,7 @@ already correct on 64-bit targets).
 
 The Poseidon2 implementation in this project uses the **exact same parameters** as the
 [Zisk zkVM](https://github.com/0xPolygonHermez/zisk) Poseidon2 precompile, enabling
-cross-system hash compatibility for future proof aggregation.
+cross-system hash compatibility with the Zisk Poseidon2 precompile.
 
 ### What matches
 
@@ -543,13 +587,14 @@ This project uses Poseidon2 in two separate contexts:
 
 | Metric | Value | Notes |
 |---|---|---|
-| Trace size | 4,096 × 181 | Padded to next power of 2 |
+| Trace size | 4,096 × 271 | Includes selector bits and hidden linkage columns |
 | Max constraint degree | 4 | Stored x7 columns + BV intermediates |
-| FRI blowup factor | 4 (log₂ = 2) | Halved from 8 via degree reduction |
-| Native prove time | ~3.5s | Release mode, single-threaded, 100-bit security |
-| Native verify time | ~1ms | Release mode |
-| WASM binary | 900 KB | Without wasm-opt (disabled due to Table.grow bug) |
-| Proof size | ~430 KB | 42 FRI queries + 16 PoW bits |
+| FRI blowup factor | 8 (`log_blowup = 3`) | Required by the completed AIR |
+| FRI queries | 34 | ~102-bit conjectured soundness, no PoW |
+| Native prove time | ~14.4s | Release mode, single-threaded, full ballot proof |
+| Native verify time | ~12ms | Release mode |
+| WASM binary | ~952 KB | `wasm-pack build --target web --release`, no wasm-opt |
+| Proof size | ~430-500 KB | Depends on query openings and transcript layout |
 
 HidingFriPcs (ZK mode) roughly doubles proving time compared to non-hiding mode because
 the trace polynomial is extended with blinding codewords.
@@ -563,8 +608,8 @@ the trace polynomial is extended with blinding codewords.
 | Hash | Poseidon (BN254 scalar field) | Poseidon2 (Goldilocks, Zisk-compatible) |
 | Trusted setup | Required (powers of tau ceremony) | **None** (transparent) |
 | Proof size | ~200 bytes | ~430 KB |
-| Prover time (browser) | ~10-30s | ~28s |
-| Verifier time | ~5ms | ~1ms (native) |
+| Prover time (browser) | ~10-30s | Targeted browser-friendly high-security profile |
+| Verifier time | ~5ms | ~1ms |
 | Ballot validation | Full (range, uniqueness, cost) | Full (range, uniqueness, cost, bounds) |
 | Post-quantum | No (relies on pairing assumptions) | Plausibly yes (hash-based) |
 | Aggregation | Not natively supported | FRI-based recursion via Zisk zkVM |
@@ -577,12 +622,12 @@ davinci-stark/
 ├── src/
 │   ├── air.rs            AIR constraint definitions (~1,100 lines)
 │   │                     EC, Poseidon2, and BV constraint sections
-│   ├── columns.rs        Trace column layout (181 columns, named constants)
+│   ├── columns.rs        Trace column layout (271 columns, named constants)
 │   ├── config.rs         STARK configuration (HidingFriPcs, FRI params, RNG)
 │   ├── ecgfp5_ops.rs     ecgfp5 point doubling/addition for trace generation
 │   ├── elgamal.rs        ElGamal keygen/encrypt helpers
 │   ├── gfp5.rs           GF(p^5) arithmetic constraint helpers
-│   ├── lib.rs            Public API: prove_ballot, verify_ballot
+│   ├── lib.rs            Public API: prove_full_ballot, verify_ballot
 │   ├── poseidon2.rs      Poseidon2 permutation and sponge with trace recording
 │   │                     Zisk-compatible constants (RC_8, D_8, HL MDS)
 │   ├── trace.rs          Trace generation (~940 lines, BallotInputs → matrix)
@@ -593,8 +638,6 @@ davinci-stark/
 │   ├── fibonacci_smoke.rs  2 Plonky3 integration smoke tests
 │   ├── gfp5_test.rs      3 GF(p^5) multiplication tests
 │   └── poseidon2_test.rs 7 Poseidon2 STARK proof tests
-├── vendor/
-│   └── p3-challenger/    Patched p3-challenger (wasm32 PoW fix)
 ├── webapp/
 │   ├── index.html        Web UI (dark theme, ballot form)
 │   ├── src/
@@ -614,13 +657,13 @@ davinci-stark/
 
 | Crate | Version | Purpose |
 |---|---|---|
-| `p3-miden-prover` | 0.4.2 | STARK prover and verifier |
-| `p3-miden-air` | 0.4.2 | AIR trait definitions |
-| `p3-miden-fri` | 0.4.2 | FRI PCS (includes HidingFriPcs) |
+| `p3-uni-stark` | 0.4.2 | STARK prover and verifier |
+| `p3-air` | 0.4.2 | AIR trait definitions |
+| `p3-fri` | 0.4.2 | FRI PCS (includes HidingFriPcs) |
 | `p3-goldilocks` | 0.4.2 | Goldilocks field + width-16 Poseidon2 permutation |
 | `p3-field` | 0.4.2 | Field traits and extension fields |
 | `p3-matrix` | 0.4.2 | Row-major matrix for execution traces |
-| `p3-challenger` | 0.4.2 (patched) | Fiat-Shamir challenger with PoW (local patch) |
+| `p3-challenger` | 0.4.2 (patched) | Fiat-Shamir challenger; patch retained for wasm32 PoW correctness |
 | `ecgfp5` | local | ecgfp5 STARK-friendly elliptic curve |
 | `serde` + `postcard` | 1.x | Compact binary serialization |
 | `wasm-bindgen` | 0.2 | WASM bindings (wasm32 only) |
@@ -662,21 +705,21 @@ cd webapp && npm install && cd ..
 
 ```bash
 make build    # Build WASM package (~866 KB)
-make test     # Run all 23 Rust tests (native, ~15s)
-make serve    # Build WASM + start dev server on 0.0.0.0:5174
+make test     # Run the Rust test suite in release mode
+make serve    # Build WASM + start the Vite dev server
 make clean    # Remove all build artifacts
 ```
 
 ### Manual commands
 
 ```bash
-# Run native tests (release mode for realistic performance)
+# Run tests in release mode
 cargo test --release
 
-# Build WASM for browser
+# Build WASM for the browser
 wasm-pack build --target web --release
 
-# Start webapp dev server
+# Start the webapp dev server
 cd webapp && npx vite --host 0.0.0.0
 ```
 

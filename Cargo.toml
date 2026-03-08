@@ -10,13 +10,13 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["std"]
 std = []
-parallel = ["p3-miden-prover/parallel", "p3-maybe-rayon/parallel"]
+parallel = ["p3-uni-stark/parallel", "p3-maybe-rayon/parallel"]
 
 [dependencies]
 # Plonky3 STARK (pure Rust, no_std compatible, WASM-friendly)
-p3-miden-prover = { version = "0.4.2", default-features = false }
-p3-miden-air = { version = "0.4.2", default-features = false }
-p3-miden-fri = "0.4.2"
+p3-air = { version = "0.4.2", default-features = false }
+p3-uni-stark = { version = "0.4.2", default-features = false }
+p3-fri = "0.4.2"
 p3-goldilocks = { version = "0.4.2", default-features = false }
 p3-field = { version = "0.4.2", default-features = false }
 p3-matrix = { version = "0.4.2", default-features = false }

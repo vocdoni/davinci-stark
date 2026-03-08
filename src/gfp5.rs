@@ -54,8 +54,7 @@ pub fn gfp5_mul_constraints<F: PrimeCharacteristicRing, E: Algebra<F> + Clone>(
             - (a[0].clone() * b[2].clone()
                 + a[1].clone() * b[1].clone()
                 + a[2].clone() * b[0].clone()
-                + three.clone()
-                    * (a[3].clone() * b[4].clone() + a[4].clone() * b[3].clone())),
+                + three.clone() * (a[3].clone() * b[4].clone() + a[4].clone() * b[3].clone())),
         // c3 = a0*b3 + a1*b2 + a2*b1 + a3*b0 + 3*a4*b4
         c[3].clone()
             - (a[0].clone() * b[3].clone()
@@ -145,4 +144,3 @@ pub fn gfp5_sub<F: PrimeCharacteristicRing, E: Algebra<F> + Clone>(a: [E; 5], b:
         a[4].clone() - b[4].clone(),
     ]
 }
-

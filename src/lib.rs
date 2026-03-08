@@ -19,35 +19,17 @@ pub mod trace;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
-use p3_goldilocks::Goldilocks;
-use p3_miden_prover::{prove, verify, Proof};
-use ecgfp5::curve::Point;
-use ecgfp5::scalar::Scalar;
-
 use air::BallotAir;
-use config::{SyncBallotConfig, make_prover_config, make_verifier_config};
-use trace::{generate_ballot_trace, generate_full_ballot_trace, BallotInputs, BallotOutputs};
+use config::{BallotConfig, make_prover_config, make_verifier_config};
+use p3_goldilocks::Goldilocks;
+use p3_uni_stark::{Proof, prove, verify};
+use trace::{BallotInputs, BallotOutputs, generate_full_ballot_trace};
 
 /// A complete ballot proof: the STARK proof object plus the public values
 /// that were committed to during proving. Both are needed for verification.
 pub struct BallotProof {
-    pub proof: Proof<SyncBallotConfig>,
+    pub proof: Proof<BallotConfig>,
     pub public_values: Vec<Goldilocks>,
-}
-
-/// Prove a single-field ElGamal encryption (legacy API, mostly for tests).
-///
-/// This is the backward-compatible entry point that proves one (C1, C2) pair.
-/// For the full 8-field ballot proof, use `prove_full_ballot` instead.
-pub fn prove_ballot(k: &Scalar, field_val: &Scalar, pk: &Point) -> BallotProof {
-    let config = make_prover_config();
-    let air = BallotAir::new();
-    let (trace, pv) = generate_ballot_trace(k, field_val, pk);
-    let proof = prove(&config, &air, &trace, &pv);
-    BallotProof {
-        proof,
-        public_values: pv,
-    }
 }
 
 /// Prove a full 8-field ballot: ElGamal encryption of each field, k-derivation
@@ -59,7 +41,7 @@ pub fn prove_full_ballot(inputs: &BallotInputs) -> (BallotProof, BallotOutputs) 
     let config = make_prover_config();
     let air = BallotAir::new();
     let (trace, pv, outputs) = generate_full_ballot_trace(inputs);
-    let proof = prove(&config, &air, &trace, &pv);
+    let proof = prove(&config, &air, trace, &pv);
     (
         BallotProof {
             proof,
@@ -76,12 +58,10 @@ pub fn prove_full_ballot(inputs: &BallotInputs) -> (BallotProof, BallotOutputs) 
 pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), impl core::fmt::Debug> {
     let config = make_verifier_config();
     let air = BallotAir::new();
-    let var_len_pis: Vec<&[&[Goldilocks]]> = vec![];
     verify(
         &config,
         &air,
         &ballot_proof.proof,
         &ballot_proof.public_values,
-        &var_len_pis,
     )
 }

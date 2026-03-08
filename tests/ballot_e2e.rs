@@ -3,70 +3,298 @@
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks;
 use p3_matrix::Matrix;
-use p3_miden_prover::{prove, verify};
+use p3_uni_stark::{prove, verify};
 
 use ecgfp5::curve::Point;
 use ecgfp5::scalar::Scalar;
 
-use davinci_stark::air::{BallotAir, PV_VOTE_ID};
-use davinci_stark::config::{make_config, Val};
-use davinci_stark::trace::generate_ballot_trace;
+use davinci_stark::air::{BallotAir, NUM_FIELDS, PV_VOTE_ID, SMALL_SCALAR_BITS};
+use davinci_stark::columns::{
+    BV_FIELDS, BV_ROW_INDEX, GLOBAL_FIELDS, GLOBAL_KS, IS_BV, PHASE, TRACE_WIDTH,
+};
+use davinci_stark::config::{make_prover_config, make_verifier_config};
+use davinci_stark::trace::{BallotInputs, BallotMode, generate_full_ballot_trace};
+
+fn base_ballot_inputs(fields: [Scalar; 8], mode: BallotMode, weight: u64) -> BallotInputs {
+    let sk = Scalar([12345, 0, 0, 0, 0]);
+    let pk = Point::mulgen(sk);
+
+    BallotInputs {
+        k: Scalar([42, 0, 0, 0, 0]),
+        fields,
+        pk,
+        process_id: [
+            Goldilocks::from_u64(1001),
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+        ],
+        address: [
+            Goldilocks::from_u64(0xDEADBEEF),
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+        ],
+        weight: Goldilocks::from_u64(weight),
+        packed_ballot_mode: mode.pack(),
+    }
+}
+
+fn assert_invalid_ballot_rejected(inputs: BallotInputs, reason: &str) {
+    let (trace, pv, _) = generate_full_ballot_trace(&inputs);
+    let prover_config = make_prover_config();
+    let verifier_config = make_verifier_config();
+    let prove_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove(&prover_config, &BallotAir::new(), trace, &pv)
+    }));
+
+    match prove_result {
+        Ok(proof) => {
+            let result = verify(&verifier_config, &BallotAir::new(), &proof, &pv);
+            assert!(
+                result.is_err(),
+                "{reason}: verifier accepted invalid ballot"
+            );
+        }
+        Err(_) => {}
+    }
+}
+
+fn assert_tampered_trace_rejected(
+    trace: p3_matrix::dense::RowMajorMatrix<Goldilocks>,
+    pv: Vec<Goldilocks>,
+    reason: &str,
+) {
+    let prover_config = make_prover_config();
+    let verifier_config = make_verifier_config();
+    let prove_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove(&prover_config, &BallotAir::new(), trace, &pv)
+    }));
+
+    match prove_result {
+        Ok(proof) => {
+            let verify_result = verify(&verifier_config, &BallotAir::new(), &proof, &pv);
+            assert!(
+                verify_result.is_err(),
+                "{reason}: verifier accepted tampered trace"
+            );
+        }
+        Err(_) => {}
+    }
+}
 
 #[test]
-fn test_full_ballot_proof() {
-    // ElGamal parameters:
-    // sk = 12345 (private key scalar)
-    // PK = sk * G (public key)
-    // k = 42 (encryption randomness)
-    // field_val = 1 (vote value)
-    //
-    // C1 = k * G
-    // C2 = field_val * G + k * PK
+fn test_public_values_must_match_trace_outputs() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([4, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 4,
+            group_size: 4,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 100,
+            min_value_sum: 0,
+        },
+        1,
+    );
 
-    let sk = Scalar([12345, 0, 0, 0, 0]);
-    let k = Scalar([42, 0, 0, 0, 0]);
-    let field_val = Scalar([1, 0, 0, 0, 0]);
+    let (trace, mut pv, outputs) = generate_full_ballot_trace(&inputs);
+    pv[PV_VOTE_ID] = outputs.vote_id + Goldilocks::ONE;
 
-    // Compute PK = sk * G
-    let pk = Point::mulgen(sk);
-    println!("PK computed. Encoded: {:?}", pk.encode());
+    let prover_config = make_prover_config();
+    let verifier_config = make_verifier_config();
+    let prove_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove(&prover_config, &BallotAir::new(), trace, &pv)
+    }));
 
-    println!("Generating ballot trace...");
-    let start = std::time::Instant::now();
-    let (trace, pv) = generate_ballot_trace(&k, &field_val, &pk);
-    let trace_time = start.elapsed();
-    println!("Trace generated in {:?}: {} rows × {} cols", trace_time, trace.height(), trace.width());
-    println!("Public values: {} elements", pv.len());
+    match prove_result {
+        Ok(proof) => {
+            let result = verify(&verifier_config, &BallotAir::new(), &proof, &pv);
+            assert!(
+                result.is_err(),
+                "AIR must bind claimed public values to the trace outputs"
+            );
+        }
+        Err(_) => {}
+    }
+}
 
-    let config = make_config();
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
+#[test]
+fn test_ec_phase_id_must_be_constrained() {
+    let inputs = base_ballot_inputs(
+        [Scalar([1, 0, 0, 0, 0]); NUM_FIELDS],
+        BallotMode {
+            num_fields: 8,
+            group_size: 8,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 200,
+            min_value_sum: 0,
+        },
+        1,
+    );
 
-    println!("Proving...");
-    let start = std::time::Instant::now();
-    let proof = prove(&config, &BallotAir::new(), &trace, &pv);
-    let prove_time = start.elapsed();
-    println!("Proof generated in {:?}", prove_time);
+    let (mut trace, pv, _) = generate_full_ballot_trace(&inputs);
+    let second_phase_first_row = SMALL_SCALAR_BITS;
+    trace.values[second_phase_first_row * TRACE_WIDTH + PHASE] += Goldilocks::ONE;
 
-    println!("Verifying...");
-    let start = std::time::Instant::now();
-    verify(&config, &BallotAir::new(), &proof, &pv, &var_len_pis)
-        .expect("verification failed");
-    let verify_time = start.elapsed();
-    println!("Verified in {:?}", verify_time);
+    assert_tampered_trace_rejected(trace, pv, "EC phase id");
+}
 
-    println!("\n✅ Full ballot proof E2E test passed!");
-    println!("  Trace gen: {:?}", trace_time);
-    println!("  Prove:     {:?}", prove_time);
-    println!("  Verify:    {:?}", verify_time);
+#[test]
+fn test_bv_row_index_must_be_constrained() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([4, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 4,
+            group_size: 4,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 100,
+            min_value_sum: 0,
+        },
+        1,
+    );
+
+    let (mut trace, pv, _) = generate_full_ballot_trace(&inputs);
+    let bv_row = (0..trace.height())
+        .find(|&row| trace.values[row * TRACE_WIDTH + IS_BV] == Goldilocks::ONE)
+        .expect("missing BV section");
+    trace.values[bv_row * TRACE_WIDTH + BV_ROW_INDEX] += Goldilocks::ONE;
+
+    assert_tampered_trace_rejected(trace, pv, "BV row index");
+}
+
+#[test]
+fn test_bv_fields_array_must_bind_to_checked_rows() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([4, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 4,
+            group_size: 4,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 100,
+            min_value_sum: 0,
+        },
+        1,
+    );
+
+    let (mut trace, pv, _) = generate_full_ballot_trace(&inputs);
+    for row in 0..trace.height() {
+        if trace.values[row * TRACE_WIDTH + IS_BV] == Goldilocks::ONE {
+            trace.values[row * TRACE_WIDTH + BV_FIELDS] += Goldilocks::ONE;
+        }
+    }
+
+    assert_tampered_trace_rejected(trace, pv, "BV replicated fields array");
+}
+
+#[test]
+fn test_derived_k_values_must_bind_poseidon_to_ec() {
+    let inputs = base_ballot_inputs(
+        [Scalar([1, 0, 0, 0, 0]); NUM_FIELDS],
+        BallotMode {
+            num_fields: 8,
+            group_size: 8,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 200,
+            min_value_sum: 0,
+        },
+        1,
+    );
+
+    let (mut trace, pv, _) = generate_full_ballot_trace(&inputs);
+    for row in 0..trace.height() {
+        trace.values[row * TRACE_WIDTH + GLOBAL_KS] += Goldilocks::ONE;
+    }
+
+    assert_tampered_trace_rejected(trace, pv, "derived k binding");
+}
+
+#[test]
+fn test_field_values_must_bind_bv_to_ec() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([4, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 4,
+            group_size: 4,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 100,
+            min_value_sum: 0,
+        },
+        1,
+    );
+
+    let (mut trace, pv, _) = generate_full_ballot_trace(&inputs);
+    for row in 0..trace.height() {
+        trace.values[row * TRACE_WIDTH + GLOBAL_FIELDS + 1] += Goldilocks::ONE;
+    }
+
+    assert_tampered_trace_rejected(trace, pv, "field binding");
 }
 
 #[test]
 fn test_ballot_wrong_vote_fails() {
     // If we generate a proof but tamper with the public vote_id,
     // verification should fail.
-    use davinci_stark::trace::{generate_full_ballot_trace, BallotInputs};
-    use davinci_stark::air::NUM_FIELDS;
-
+    use davinci_stark::trace::{BallotInputs, generate_full_ballot_trace};
     let sk = Scalar([12345, 0, 0, 0, 0]);
     let pk = Point::mulgen(sk);
 
@@ -74,8 +302,18 @@ fn test_ballot_wrong_vote_fails() {
         k: Scalar([42, 0, 0, 0, 0]),
         fields: [Scalar([1, 0, 0, 0, 0]); NUM_FIELDS],
         pk,
-        process_id: [Goldilocks::from_u64(1001), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
-        address: [Goldilocks::from_u64(0xDEADBEEF), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
+        process_id: [
+            Goldilocks::from_u64(1001),
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+        ],
+        address: [
+            Goldilocks::from_u64(0xDEADBEEF),
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+        ],
         weight: Goldilocks::from_u64(1),
         packed_ballot_mode: {
             use davinci_stark::trace::BallotMode;
@@ -89,7 +327,8 @@ fn test_ballot_wrong_vote_fails() {
                 min_value: 0,
                 max_value_sum: 200,
                 min_value_sum: 0,
-            }.pack()
+            }
+            .pack()
         },
     };
 
@@ -99,20 +338,23 @@ fn test_ballot_wrong_vote_fails() {
     let mut wrong_pv = correct_pv.clone();
     wrong_pv[PV_VOTE_ID] = Goldilocks::from_u64(999999);
 
-    let config = make_config();
-    let proof = prove(&config, &BallotAir::new(), &trace, &correct_pv);
+    let prover_config = make_prover_config();
+    let verifier_config = make_verifier_config();
+    let proof = prove(&prover_config, &BallotAir::new(), trace, &correct_pv);
 
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
-    let result = verify(&config, &BallotAir::new(), &proof, &wrong_pv, &var_len_pis);
+    let result = verify(&verifier_config, &BallotAir::new(), &proof, &wrong_pv);
 
-    assert!(result.is_err(), "Verification should fail with wrong public values");
+    assert!(
+        result.is_err(),
+        "Verification should fail with wrong public values"
+    );
     println!("✅ Wrong vote correctly rejected!");
 }
 
 #[test]
 fn test_full_8field_ballot_proof() {
-    use davinci_stark::trace::{generate_full_ballot_trace, BallotInputs};
     use davinci_stark::air::NUM_FIELDS;
+    use davinci_stark::trace::{BallotInputs, generate_full_ballot_trace};
 
     let sk = Scalar([12345, 0, 0, 0, 0]);
     let pk = Point::mulgen(sk);
@@ -155,7 +397,8 @@ fn test_full_8field_ballot_proof() {
                 min_value: 0,
                 max_value_sum: 100,
                 min_value_sum: 0,
-            }.pack()
+            }
+            .pack()
         },
     };
 
@@ -163,15 +406,22 @@ fn test_full_8field_ballot_proof() {
     let start = std::time::Instant::now();
     let (trace, pv, outputs) = generate_full_ballot_trace(&inputs);
     let trace_time = start.elapsed();
-    println!("Trace: {} rows × {} cols in {:?}", trace.height(), trace.width(), trace_time);
+    println!(
+        "Trace: {} rows × {} cols in {:?}",
+        trace.height(),
+        trace.width(),
+        trace_time
+    );
     println!("Vote ID: {:?}", outputs.vote_id);
     println!("Inputs hash: {:?}", outputs.inputs_hash);
 
     // Verify k-chain produces different keys
     for i in 0..NUM_FIELDS {
-        for j in (i+1)..NUM_FIELDS {
-            assert_ne!(outputs.k_derived[i], outputs.k_derived[j],
-                "k-derived values must be unique");
+        for j in (i + 1)..NUM_FIELDS {
+            assert_ne!(
+                outputs.k_derived[i], outputs.k_derived[j],
+                "k-derived values must be unique"
+            );
         }
     }
 
@@ -182,18 +432,17 @@ fn test_full_8field_ballot_proof() {
         assert!(nonzero, "C1[{}] should not be neutral", i);
     }
 
-    let config = make_config();
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
-
+    let prover_config = make_prover_config();
+    let verifier_config = make_verifier_config();
     println!("Proving 8-field ballot...");
     let start = std::time::Instant::now();
-    let proof = prove(&config, &BallotAir::new(), &trace, &pv);
+    let proof = prove(&prover_config, &BallotAir::new(), trace, &pv);
     let prove_time = start.elapsed();
     println!("Proof generated in {:?}", prove_time);
 
     println!("Verifying...");
     let start = std::time::Instant::now();
-    verify(&config, &BallotAir::new(), &proof, &pv, &var_len_pis)
+    verify(&verifier_config, &BallotAir::new(), &proof, &pv)
         .expect("8-field ballot verification failed");
     let verify_time = start.elapsed();
     println!("Verified in {:?}", verify_time);
@@ -207,8 +456,7 @@ fn test_full_8field_ballot_proof() {
 /// Test with the exact webapp default config (group_size=1, max_sum=1125, min_sum=5).
 #[test]
 fn test_webapp_defaults() {
-    use davinci_stark::trace::{generate_full_ballot_trace, BallotInputs, BallotMode};
-    use davinci_stark::air::NUM_FIELDS;
+    use davinci_stark::trace::{BallotInputs, BallotMode, generate_full_ballot_trace};
 
     let sk = Scalar([12345, 0, 0, 0, 0]);
     let pk = Point::mulgen(sk);
@@ -249,20 +497,20 @@ fn test_webapp_defaults() {
             min_value: 0,
             max_value_sum: 1125,
             min_value_sum: 5,
-        }.pack(),
+        }
+        .pack(),
     };
 
     println!("Generating webapp-defaults ballot trace...");
     let (trace, pv, _) = generate_full_ballot_trace(&inputs);
 
-    let config = make_config();
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
-
+    let prover_config = make_prover_config();
+    let verifier_config = make_verifier_config();
     println!("Proving...");
-    let proof = prove(&config, &BallotAir::new(), &trace, &pv);
+    let proof = prove(&prover_config, &BallotAir::new(), trace, &pv);
 
     println!("Verifying...");
-    verify(&config, &BallotAir::new(), &proof, &pv, &var_len_pis)
+    verify(&verifier_config, &BallotAir::new(), &proof, &pv)
         .expect("Webapp-defaults verification failed");
     println!("✅ Webapp-defaults test passed!");
 }
@@ -273,15 +521,8 @@ fn test_webapp_defaults() {
 /// from an invalid trace (STARKs don't prevent this), but verify() must return Err.
 #[test]
 fn test_out_of_range_ballot_rejected() {
-    use davinci_stark::trace::{generate_full_ballot_trace, BallotInputs, BallotMode};
-    use davinci_stark::air::NUM_FIELDS;
-
-    let sk = Scalar([12345, 0, 0, 0, 0]);
-    let pk = Point::mulgen(sk);
-
-    let inputs = BallotInputs {
-        k: Scalar([42, 0, 0, 0, 0]),
-        fields: [
+    let inputs = base_ballot_inputs(
+        [
             Scalar([1, 0, 0, 0, 0]),
             Scalar([2, 0, 0, 0, 0]),
             Scalar([3, 0, 0, 0, 0]), // INVALID: > max_value=2
@@ -291,33 +532,168 @@ fn test_out_of_range_ballot_rejected() {
             Scalar([0, 0, 0, 0, 0]),
             Scalar([0, 0, 0, 0, 0]),
         ],
-        pk,
-        process_id: [Goldilocks::from_u64(1001), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
-        address: [Goldilocks::from_u64(0xDEADBEEF), Goldilocks::ZERO, Goldilocks::ZERO, Goldilocks::ZERO],
-        weight: Goldilocks::from_u64(1),
-        packed_ballot_mode: BallotMode {
+        BallotMode {
             num_fields: 5,
             group_size: 1,
             unique_values: 0,
             cost_from_weight: 0,
             cost_exponent: 2,
-            max_value: 2,    // Only 0, 1, 2 are valid choices
+            max_value: 2,
             min_value: 0,
             max_value_sum: 0,
             min_value_sum: 0,
-        }.pack(),
-    };
+        },
+        1,
+    );
+    assert_invalid_ballot_rejected(inputs, "out-of-range field values");
+}
 
-    let (trace, pv, _) = generate_full_ballot_trace(&inputs);
+#[test]
+fn test_duplicate_values_rejected_when_uniqueness_enabled() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([1, 0, 0, 0, 0]), // duplicate active value
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 4,
+            group_size: 1,
+            unique_values: 1,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 10,
+            min_value: 0,
+            max_value_sum: 20,
+            min_value_sum: 0,
+        },
+        1,
+    );
 
-    let config = make_config();
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
+    assert_invalid_ballot_rejected(inputs, "duplicate active values with uniqueness enabled");
+}
 
-    println!("Proving invalid ballot (fields 3,4,5 exceed max_value=2)...");
-    let proof = prove(&config, &BallotAir::new(), &trace, &pv);
-    println!("Proof bytes produced. Now verifying (should FAIL)...");
+#[test]
+fn test_cost_sum_above_max_rejected() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([5, 0, 0, 0, 0]),
+            Scalar([5, 0, 0, 0, 0]),
+            Scalar([5, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 3,
+            group_size: 1,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 2,
+            max_value: 10,
+            min_value: 0,
+            max_value_sum: 50, // 5^2 + 5^2 + 5^2 = 75
+            min_value_sum: 0,
+        },
+        1,
+    );
 
-    let result = verify(&config, &BallotAir::new(), &proof, &pv, &var_len_pis);
-    assert!(result.is_err(), "Verification must reject out-of-range ballot, but it passed!");
-    println!("✅ Out-of-range ballot correctly rejected by verifier: {:?}", result.unwrap_err());
+    assert_invalid_ballot_rejected(inputs, "cost sum above max_value_sum");
+}
+
+#[test]
+fn test_cost_sum_below_min_rejected() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 2,
+            group_size: 1,
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 10,
+            min_value: 0,
+            max_value_sum: 100,
+            min_value_sum: 5, // total cost is 2
+        },
+        1,
+    );
+
+    assert_invalid_ballot_rejected(inputs, "cost sum below min_value_sum");
+}
+
+#[test]
+fn test_cost_from_weight_uses_weight_limit() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 2,
+            group_size: 1,
+            unique_values: 0,
+            cost_from_weight: 1,
+            cost_exponent: 1,
+            max_value: 10,
+            min_value: 0,
+            max_value_sum: 999, // should be ignored when cost_from_weight=1
+            min_value_sum: 0,
+        },
+        5, // total cost is 6, should fail
+    );
+
+    assert_invalid_ballot_rejected(inputs, "cost_from_weight upper bound");
+}
+
+#[test]
+fn test_group_size_cannot_exceed_num_fields() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 2,
+            group_size: 3, // invalid
+            unique_values: 0,
+            cost_from_weight: 0,
+            cost_exponent: 1,
+            max_value: 10,
+            min_value: 0,
+            max_value_sum: 100,
+            min_value_sum: 0,
+        },
+        1,
+    );
+
+    assert_invalid_ballot_rejected(inputs, "group_size greater than num_fields");
 }

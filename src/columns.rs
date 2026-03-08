@@ -3,7 +3,7 @@
 //! The trace is a flat matrix where each row contains all the data for one step
 //! of computation. The columns are laid out so that EC scalar mul data and
 //! Poseidon2 hash data can share physical columns (they never run in the same
-//! row), which keeps the total width at 180 instead of ~220.
+//! row), while selectors and hidden linkage columns expand the full row width to 271.
 //!
 //! This file just defines named constants for column offsets. The actual
 //! constraint logic that reads these columns lives in air.rs.
@@ -123,6 +123,31 @@ pub const IS_P2: usize = IS_EC + 1; // 179
 pub const IS_BV: usize = IS_P2 + 1; // 180
 
 // When IS_EC=0 and IS_P2=0 and IS_BV=0, the row is padding (no constraints).
+
+/// One-hot Poseidon round selectors. Only meaningful on IS_P2 rows.
+pub const P2_ROUND_SEL: usize = IS_BV + 1; // 181
+pub const P2_ROUND_SEL_COUNT: usize = 30;
+
+/// One-hot ballot-validation row selectors. Only meaningful on IS_BV rows.
+pub const BV_ROW_SEL: usize = P2_ROUND_SEL + P2_ROUND_SEL_COUNT; // 211
+pub const BV_ROW_SEL_COUNT: usize = 9;
+
+/// Extra EC binding columns used only in the full-ballot path.
+pub const EC_BIND_ACTIVE: usize = BV_ROW_SEL + BV_ROW_SEL_COUNT; // 220
+pub const EC_SCALAR_ACC: usize = EC_BIND_ACTIVE + 1; // 221
+pub const EC_SCALAR_TARGET: usize = EC_SCALAR_ACC + 1; // 222
+pub const EC_PHASE_SEL: usize = EC_SCALAR_TARGET + 1; // 223
+pub const EC_PHASE_SEL_COUNT: usize = 24;
+
+/// Hidden global values replicated on every row and linked to multiple sections.
+pub const GLOBAL_KS: usize = EC_PHASE_SEL + EC_PHASE_SEL_COUNT; // 247
+pub const GLOBAL_KS_COUNT: usize = 8;
+pub const GLOBAL_FIELDS: usize = GLOBAL_KS + GLOBAL_KS_COUNT; // 255
+pub const GLOBAL_FIELDS_COUNT: usize = 8;
+
+/// Selectors for the first 8 Poseidon permutations (the k-derivation chain).
+pub const P2_K_SEL: usize = GLOBAL_FIELDS + GLOBAL_FIELDS_COUNT; // 263
+pub const P2_K_SEL_COUNT: usize = 8;
 
 // ==========================================================================
 // Poseidon2 columns (active when IS_P2 = 1)
@@ -290,11 +315,20 @@ pub const BV_ACC_INTER: usize = BV_IS_BOUNDS + 1; // 159
 pub const BV_ACC_INTER_COUNT: usize = 7; // columns 159..165
 
 // ==========================================================================
+// Public-output row columns (active on the dedicated final binding row)
+// ==========================================================================
+
+/// Dedicated output row storage for the 9 public values.
+/// This row has all section flags set to 0, so these columns do not overlap
+/// with any active constraints from EC, Poseidon2, or ballot validation.
+pub const PUB_OUTPUTS: usize = 0;
+
+// ==========================================================================
 // Total trace width
 // ==========================================================================
 
-/// The widest section (EC) uses 178 columns, plus IS_EC, IS_P2, IS_BV = 181.
-pub const TRACE_WIDTH: usize = IS_BV + 1; // 181
+/// Total trace width including section flags and selector bits.
+pub const TRACE_WIDTH: usize = P2_K_SEL + P2_K_SEL_COUNT; // 271
 
 // ==========================================================================
 // Helpers
@@ -331,4 +365,3 @@ pub fn gfp5_to_felts<F: Field>(g: &ecgfp5::field::GFp5) -> [F; 5] {
         F::from_u64(arr[4].to_u64()),
     ]
 }
-

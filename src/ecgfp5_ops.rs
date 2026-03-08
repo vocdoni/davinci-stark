@@ -9,11 +9,11 @@
 //! the addition formula uses 10. We store every intermediate product as
 //! a trace column so that each constraint stays at degree 2.
 
-use ecgfp5::field::GFp5;
-use ecgfp5::curve::Point;
-use p3_goldilocks::Goldilocks;
-use p3_field::PrimeCharacteristicRing;
 use crate::columns::*;
+use ecgfp5::curve::Point;
+use ecgfp5::field::GFp5;
+use p3_field::PrimeCharacteristicRing;
+use p3_goldilocks::Goldilocks;
 
 /// Write a single GF(p^5) element into the trace row at `offset`.
 fn write_gfp5(row: &mut [Goldilocks], offset: usize, v: &GFp5) {
@@ -78,7 +78,12 @@ pub fn fill_doubling(row: &mut [Goldilocks], acc: &Point) -> Point {
     let u_out = wz_sq - t4 - z_out;
     let t_out = x1.double() - t4.mul_small(4) - z_out;
 
-    let doubled = Point { X: x_out, Z: z_out, U: u_out, T: t_out };
+    let doubled = Point {
+        X: x_out,
+        Z: z_out,
+        U: u_out,
+        T: t_out,
+    };
     write_point(row, DBL_X, &doubled);
     doubled
 }
@@ -135,7 +140,12 @@ pub fn fill_addition(row: &mut [Goldilocks], p1: &Point, p2: &Point) -> Point {
     let u_out = u_pre;
     let t_out = at8 + at9;
 
-    let added = Point { X: x_out, Z: z_out, U: u_out, T: t_out };
+    let added = Point {
+        X: x_out,
+        Z: z_out,
+        U: u_out,
+        T: t_out,
+    };
     write_point(row, ADD_X, &added);
     added
 }

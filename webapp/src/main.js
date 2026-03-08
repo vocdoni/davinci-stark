@@ -5,6 +5,10 @@
 // the call() helper which returns a promise resolved when the worker replies.
 
 const logEl = document.getElementById('log');
+const metricKeygenEl = document.getElementById('metric-keygen');
+const metricProveEl = document.getElementById('metric-prove');
+const metricVerifyEl = document.getElementById('metric-verify');
+const metricNoteEl = document.getElementById('metric-note');
 let pkBytes = null;
 let proofData = null;
 let msgId = 0;
@@ -48,6 +52,10 @@ function log(msg, cls = '') {
   span.textContent = msg + '\n';
   logEl.appendChild(span);
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setMetric(el, value) {
+  el.textContent = value;
 }
 
 // Convert hex string (with optional 0x prefix) to Uint8Array.
@@ -163,7 +171,9 @@ window.doProve = async function() {
     const kgResult = await call('keygen', { skBytes });
     pkBytes = kgResult.pk;
     log(`PK: ${bytesToHex(pkBytes).substring(0, 40)}...`);
-    log(`⏱ Keygen: ${(performance.now() - kgStart).toFixed(1)}ms`, 'timing');
+    const keygenMs = performance.now() - kgStart;
+    log(`⏱ Keygen: ${keygenMs.toFixed(1)}ms`, 'timing');
+    setMetric(metricKeygenEl, `${keygenMs.toFixed(1)} ms`);
 
     // Build binary inputs
     const kBytes = hexToBytes(kHex);
@@ -200,6 +210,9 @@ window.doProve = async function() {
     log(`✅ Proof generated!`, 'success');
     log(`Proof size: ${proofData.length} bytes (${(proofData.length / 1024).toFixed(1)} KB)`);
     log(`⏱ ${(elapsed / 1000).toFixed(1)}s`, 'timing');
+    setMetric(metricProveEl, `${(elapsed / 1000).toFixed(2)} s`);
+    metricNoteEl.textContent =
+      `FRI config: blowup 8, 34 queries, 0 PoW bits. Last proof size: ${(proofData.length / 1024).toFixed(1)} KB.`;
 
     // Show proof data
     document.getElementById('proof-card').style.display = 'block';
@@ -228,6 +241,7 @@ window.doVerify = async function() {
       log('❌ Proof is INVALID', 'error');
     }
     log(`⏱ ${elapsed.toFixed(1)}ms`, 'timing');
+    setMetric(metricVerifyEl, `${elapsed.toFixed(1)} ms`);
   } catch (e) {
     log('❌ Verification failed: ' + e, 'error');
   }

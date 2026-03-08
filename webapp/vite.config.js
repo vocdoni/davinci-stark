@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait()],
   server: {
     host: '0.0.0.0',
+    allowedHosts: true,
     fs: {
       allow: ['..'],
     },

@@ -2,19 +2,19 @@
 
 use core::borrow::Borrow;
 
+use p3_air::{Air, AirBuilder, BaseAir};
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
-use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
+use p3_field::{Field, PrimeCharacteristicRing};
+use p3_fri::{TwoAdicFriPcs, create_test_fri_params};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
-use p3_miden_air::{MidenAir, MidenAirBuilder};
-use p3_miden_fri::{TwoAdicFriPcs, create_test_fri_params};
-use p3_miden_prover::{StarkConfig, prove, verify};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_uni_stark::{StarkConfig, prove, verify};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
@@ -41,12 +41,14 @@ impl<T> Borrow<Gfp5MulRow<T>> for [T] {
     }
 }
 
-impl<F: Field, EF: ExtensionField<F>> MidenAir<F, EF> for Gfp5MulAir {
+impl<F: PrimeCharacteristicRing> BaseAir<F> for Gfp5MulAir {
     fn width(&self) -> usize {
         15
     }
+}
 
-    fn eval<AB: MidenAirBuilder<F = F>>(&self, builder: &mut AB) {
+impl<AB: AirBuilder> Air<AB> for Gfp5MulAir {
+    fn eval(&self, builder: &mut AB) {
         let main = builder.main();
         let local = main.row_slice(0).expect("empty");
         let local: &Gfp5MulRow<AB::Var> = (*local).borrow();
@@ -145,10 +147,8 @@ fn test_gfp5_mul_simple() {
     let trace = generate_gfp5_mul_trace(&pairs);
     let config = make_config();
     let pis: Vec<Val> = vec![];
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
-
-    let proof = prove(&config, &Gfp5MulAir, &trace, &pis);
-    verify(&config, &Gfp5MulAir, &proof, &pis, &var_len_pis).expect("verification failed");
+    let proof = prove(&config, &Gfp5MulAir, trace, &pis);
+    verify(&config, &Gfp5MulAir, &proof, &pis).expect("verification failed");
     println!("GF(p^5) simple multiplication proof verified!");
 }
 
@@ -160,10 +160,8 @@ fn test_gfp5_mul_extension() {
     let trace = generate_gfp5_mul_trace(&pairs);
     let config = make_config();
     let pis: Vec<Val> = vec![];
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
-
-    let proof = prove(&config, &Gfp5MulAir, &trace, &pis);
-    verify(&config, &Gfp5MulAir, &proof, &pis, &var_len_pis).expect("verification failed");
+    let proof = prove(&config, &Gfp5MulAir, trace, &pis);
+    verify(&config, &Gfp5MulAir, &proof, &pis).expect("verification failed");
     println!("GF(p^5) extension multiplication proof verified!");
 }
 
@@ -171,17 +169,15 @@ fn test_gfp5_mul_extension() {
 fn test_gfp5_mul_multiple_rows() {
     // Multiple multiplications in the same trace
     let pairs = vec![
-        ([1, 0, 0, 0, 0], [1, 0, 0, 0, 0]),       // 1 * 1 = 1
-        ([2, 0, 0, 0, 0], [3, 0, 0, 0, 0]),       // 2 * 3 = 6
-        ([1, 1, 0, 0, 0], [1, 1, 0, 0, 0]),       // (1+z) * (1+z)
-        ([0, 1, 0, 0, 0], [0, 0, 0, 0, 1]),       // z * z^4 = z^5 = 3
+        ([1, 0, 0, 0, 0], [1, 0, 0, 0, 0]), // 1 * 1 = 1
+        ([2, 0, 0, 0, 0], [3, 0, 0, 0, 0]), // 2 * 3 = 6
+        ([1, 1, 0, 0, 0], [1, 1, 0, 0, 0]), // (1+z) * (1+z)
+        ([0, 1, 0, 0, 0], [0, 0, 0, 0, 1]), // z * z^4 = z^5 = 3
     ];
     let trace = generate_gfp5_mul_trace(&pairs);
     let config = make_config();
     let pis: Vec<Val> = vec![];
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
-
-    let proof = prove(&config, &Gfp5MulAir, &trace, &pis);
-    verify(&config, &Gfp5MulAir, &proof, &pis, &var_len_pis).expect("verification failed");
+    let proof = prove(&config, &Gfp5MulAir, trace, &pis);
+    verify(&config, &Gfp5MulAir, &proof, &pis).expect("verification failed");
     println!("GF(p^5) multiple multiplications proof verified!");
 }

@@ -13,17 +13,13 @@
 //! The IS_EC and IS_P2 flags are themselves constrained to be binary and
 //! mutually exclusive on every row.
 
-use p3_field::{Algebra, ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
+use p3_field::{Algebra, PrimeCharacteristicRing};
 use p3_matrix::Matrix;
-use p3_miden_air::{MidenAir, MidenAirBuilder};
 
 use crate::columns::*;
 use crate::gfp5::*;
 use crate::poseidon2;
-
-/// Full ecgfp5 scalar bit count (group order is roughly 2^319).
-/// Used for the legacy single-field API which operates on full scalars.
-pub const SCALAR_BITS: usize = 319;
 
 /// Bit count for derived scalars (k_i values are Goldilocks elements, 64 bits).
 /// Using 64-bit muls instead of 319-bit saves about 80% of EC rows.
@@ -32,27 +28,8 @@ pub const SMALL_SCALAR_BITS: usize = 64;
 /// Number of vote fields in a ballot.
 pub const NUM_FIELDS: usize = 8;
 
-/// Each field needs 3 scalar muls: k_i*G, k_i*PK, field_i*G.
-pub const SCALAR_MULS_PER_FIELD: usize = 3;
-
-/// Total scalar multiplications in a full ballot proof: 8 fields x 3 = 24.
-pub const NUM_SCALAR_MULS: usize = NUM_FIELDS * SCALAR_MULS_PER_FIELD;
-
-/// EC rows with full 319-bit scalars (used by legacy single-field API).
-pub const EC_ROWS: usize = SCALAR_BITS * NUM_SCALAR_MULS;
-
 /// Poseidon2 rounds per permutation (4 full + 22 partial + 4 full = 30).
 pub const P2_ROUNDS_PER_PERM: usize = poseidon2::TOTAL_ROUNDS;
-
-/// Trace height for legacy single-field proofs (padded to 2^14).
-pub const TRACE_HEIGHT: usize = 16384;
-
-/// Section type constants (not used as columns -- just for documentation and
-/// trace-generation logic).
-pub const SECTION_EC: u64 = 0;
-pub const SECTION_P2: u64 = 1;
-pub const SECTION_VALID: u64 = 2;
-pub const SECTION_PAD: u64 = 3;
 
 // -- Public values layout --
 // These indices define where each public value lives in the PV vector.
@@ -84,15 +61,33 @@ impl BallotAir {
     }
 }
 
-impl<F: Field, EF: ExtensionField<F>> MidenAir<F, EF> for BallotAir {
+impl<F> BaseAir<F> for BallotAir
+where
+    F: PrimeCharacteristicRing,
+{
     fn width(&self) -> usize {
         TRACE_WIDTH
     }
+}
 
-    fn eval<AB: MidenAirBuilder<F = F>>(&self, builder: &mut AB) {
+impl<F> BaseAirWithPublicValues<F> for BallotAir
+where
+    F: PrimeCharacteristicRing,
+{
+    fn num_public_values(&self) -> usize {
+        PV_COUNT
+    }
+}
+
+impl<AB> Air<AB> for BallotAir
+where
+    AB: AirBuilder + AirBuilderWithPublicValues,
+{
+    fn eval(&self, builder: &mut AB) {
         let main = builder.main();
         let local = main.row_slice(0).expect("empty trace");
         let next = main.row_slice(1).expect("trace too short");
+        let public_values = builder.public_values().to_vec();
 
         let is_ec: AB::Expr = local[IS_EC].clone().into();
         let is_p2: AB::Expr = local[IS_P2].clone().into();
@@ -124,6 +119,7 @@ impl<F: Field, EF: ExtensionField<F>> MidenAir<F, EF> for BallotAir {
         // Range checks, uniqueness, power computation, cost bounds.
         // ============================================================
         eval_bv_constraints::<AB>(builder, &local, &next, &is_bv);
+        eval_global_bindings::<AB>(builder, &local, &next);
 
         // ============================================================
         // First-row boundary: the accumulator starts at the neutral point.
@@ -149,6 +145,14 @@ impl<F: Field, EF: ExtensionField<F>> MidenAir<F, EF> for BallotAir {
             for i in 1..5 {
                 first.assert_zero(is_ec.clone() * acc_t[i].clone());
             }
+            first.assert_zero(is_ec.clone() * local[PHASE].clone());
+        }
+
+        {
+            let mut last = builder.when_last_row();
+            for i in 0..PV_COUNT {
+                last.assert_eq(local[PUB_OUTPUTS + i].clone(), public_values[i]);
+            }
         }
     }
 }
@@ -167,7 +171,7 @@ impl<F: Field, EF: ExtensionField<F>> MidenAir<F, EF> for BallotAir {
 ///
 /// All constraints are multiplied by `gate` so they evaluate to zero on
 /// non-EC rows regardless of what data is in those columns.
-fn eval_ec_constraints<AB: MidenAirBuilder>(
+fn eval_ec_constraints<AB: AirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
@@ -217,14 +221,61 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
     let add_u_pre: [AB::Expr; 5] = gfp5_expr::<AB>(local, ADD_U_PRE);
 
     let is_last: AB::Expr = local[IS_LAST_IN_PHASE].clone().into();
+    let phase: AB::Expr = local[PHASE].clone().into();
+    let bind_active: AB::Expr = local[EC_BIND_ACTIVE].clone().into();
+    let scalar_acc: AB::Expr = local[EC_SCALAR_ACC].clone().into();
+    let scalar_target: AB::Expr = local[EC_SCALAR_TARGET].clone().into();
+    let phase_selectors: Vec<AB::Expr> = (0..EC_PHASE_SEL_COUNT)
+        .map(|i| local[EC_PHASE_SEL + i].clone().into())
+        .collect();
+    let global_ks: Vec<AB::Expr> = (0..GLOBAL_KS_COUNT)
+        .map(|i| local[GLOBAL_KS + i].clone().into())
+        .collect();
+    let global_fields: Vec<AB::Expr> = (0..GLOBAL_FIELDS_COUNT)
+        .map(|i| local[GLOBAL_FIELDS + i].clone().into())
+        .collect();
 
     let next_acc_x: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_X);
     let next_acc_z: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_Z);
     let next_acc_u: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_U);
     let next_acc_t: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_T);
+    let next_base_x: [AB::Expr; 5] = gfp5_expr::<AB>(next, BASE_X);
+    let next_base_z: [AB::Expr; 5] = gfp5_expr::<AB>(next, BASE_Z);
+    let next_base_u: [AB::Expr; 5] = gfp5_expr::<AB>(next, BASE_U);
+    let next_base_t: [AB::Expr; 5] = gfp5_expr::<AB>(next, BASE_T);
+    let next_phase: AB::Expr = next[PHASE].clone().into();
+    let next_bind_active: AB::Expr = next[EC_BIND_ACTIVE].clone().into();
+    let next_scalar_acc: AB::Expr = next[EC_SCALAR_ACC].clone().into();
 
     // Bit validity: gate * bit * (1 - bit) = 0
     builder.assert_zero(gate.clone() * bit.clone() * (AB::Expr::ONE - bit.clone()));
+    builder.assert_zero(gate.clone() * bind_active.clone() * (bind_active.clone() - AB::Expr::ONE));
+
+    let mut phase_sel_sum = AB::Expr::ZERO;
+    let mut expected_phase = AB::Expr::ZERO;
+    let mut expected_target = AB::Expr::ZERO;
+    for (p, sel) in phase_selectors.iter().enumerate() {
+        phase_sel_sum = phase_sel_sum + sel.clone();
+        expected_phase = expected_phase + sel.clone() * AB::Expr::from_u64(p as u64);
+        let source = if p % 3 < 2 {
+            global_ks[p / 3].clone()
+        } else {
+            global_fields[p / 3].clone()
+        };
+        expected_target = expected_target + sel.clone() * source;
+        builder.assert_zero(gate.clone() * sel.clone() * (sel.clone() - AB::Expr::ONE));
+    }
+    builder.assert_zero(gate.clone() * (phase_sel_sum - bind_active.clone()));
+    builder.assert_zero(gate.clone() * bind_active.clone() * (phase.clone() - expected_phase));
+    builder.assert_zero(
+        gate.clone() * bind_active.clone() * (scalar_target.clone() - expected_target),
+    );
+    builder.assert_zero(
+        gate.clone()
+            * bind_active.clone()
+            * is_last.clone()
+            * (scalar_acc.clone() - scalar_target.clone()),
+    );
 
     // --- Doubling constraints (gated) ---
     // dbl_t1 = acc_Z * acc_T
@@ -232,7 +283,8 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
         builder.assert_zero(gate.clone() * c);
     }
     // dbl_t2 = dbl_t1 * acc_T
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_t1.clone(), acc_t.clone(), dbl_t2.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_t1.clone(), acc_t.clone(), dbl_t2.clone())
+    {
         builder.assert_zero(gate.clone() * c);
     }
     // dbl_x1 = dbl_t2^2
@@ -240,7 +292,8 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
         builder.assert_zero(gate.clone() * c);
     }
     // dbl_z1 = dbl_t1 * acc_U
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_t1.clone(), acc_u.clone(), dbl_z1.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_t1.clone(), acc_u.clone(), dbl_z1.clone())
+    {
         builder.assert_zero(gate.clone() * c);
     }
     // dbl_t3 = acc_U^2
@@ -249,7 +302,9 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
     }
     // dbl_xz_t3 = (acc_X + acc_Z) * dbl_t3
     let acc_x_plus_z = gfp5_add::<AB::F, AB::Expr>(acc_x.clone(), acc_z.clone());
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_x_plus_z, dbl_t3.clone(), dbl_xz_t3.clone()) {
+    for c in
+        gfp5_mul_constraints::<AB::F, AB::Expr>(acc_x_plus_z, dbl_t3.clone(), dbl_xz_t3.clone())
+    {
         builder.assert_zero(gate.clone() * c);
     }
     // W1 = dbl_t2 - 2*dbl_xz_t3
@@ -299,16 +354,20 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
     }
 
     // --- Addition constraints (gated) ---
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_x.clone(), base_x.clone(), add_at1.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_x.clone(), base_x.clone(), add_at1.clone())
+    {
         builder.assert_zero(gate.clone() * c);
     }
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_z.clone(), base_z.clone(), add_at2.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_z.clone(), base_z.clone(), add_at2.clone())
+    {
         builder.assert_zero(gate.clone() * c);
     }
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_u.clone(), base_u.clone(), add_at3.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_u.clone(), base_u.clone(), add_at3.clone())
+    {
         builder.assert_zero(gate.clone() * c);
     }
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_t.clone(), base_t.clone(), add_at4.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(dbl_t.clone(), base_t.clone(), add_at4.clone())
+    {
         builder.assert_zero(gate.clone() * c);
     }
     let dxz = gfp5_add::<AB::F, AB::Expr>(dbl_x.clone(), dbl_z.clone());
@@ -382,37 +441,129 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
     // --- Multiplexer: next_acc = bit ? added : doubled ---
     {
         let mut when_trans = builder.when_transition();
+        let next_is_ec: AB::Expr = next[IS_EC].clone().into();
         let not_last = AB::Expr::ONE - is_last.clone();
         for i in 0..5 {
             when_trans.assert_zero(
-                gate.clone() * not_last.clone() * (
-                    next_acc_x[i].clone() - dbl_x[i].clone()
-                        - bit.clone() * (add_x[i].clone() - dbl_x[i].clone())
-                ),
+                gate.clone()
+                    * not_last.clone()
+                    * (next_acc_x[i].clone()
+                        - dbl_x[i].clone()
+                        - bit.clone() * (add_x[i].clone() - dbl_x[i].clone())),
             );
             when_trans.assert_zero(
-                gate.clone() * not_last.clone() * (
-                    next_acc_z[i].clone() - dbl_z[i].clone()
-                        - bit.clone() * (add_z[i].clone() - dbl_z[i].clone())
-                ),
+                gate.clone()
+                    * not_last.clone()
+                    * (next_acc_z[i].clone()
+                        - dbl_z[i].clone()
+                        - bit.clone() * (add_z[i].clone() - dbl_z[i].clone())),
             );
             when_trans.assert_zero(
-                gate.clone() * not_last.clone() * (
-                    next_acc_u[i].clone() - dbl_u[i].clone()
-                        - bit.clone() * (add_u[i].clone() - dbl_u[i].clone())
-                ),
+                gate.clone()
+                    * not_last.clone()
+                    * (next_acc_u[i].clone()
+                        - dbl_u[i].clone()
+                        - bit.clone() * (add_u[i].clone() - dbl_u[i].clone())),
             );
             when_trans.assert_zero(
-                gate.clone() * not_last.clone() * (
-                    next_acc_t[i].clone() - dbl_t[i].clone()
-                        - bit.clone() * (add_t[i].clone() - dbl_t[i].clone())
-                ),
+                gate.clone()
+                    * not_last.clone()
+                    * (next_acc_t[i].clone()
+                        - dbl_t[i].clone()
+                        - bit.clone() * (add_t[i].clone() - dbl_t[i].clone())),
             );
         }
         // is_last  in  {0, 1}
+        when_trans.assert_zero(gate.clone() * is_last.clone() * (AB::Expr::ONE - is_last.clone()));
+
+        // Phase bookkeeping is part of the EC statement.
         when_trans.assert_zero(
-            gate.clone() * is_last.clone() * (AB::Expr::ONE - is_last.clone())
+            gate.clone()
+                * next_is_ec.clone()
+                * not_last.clone()
+                * (next_phase.clone() - phase.clone()),
         );
+        when_trans.assert_zero(
+            gate.clone()
+                * next_is_ec.clone()
+                * is_last.clone()
+                * (next_phase.clone() - phase.clone() - AB::Expr::ONE),
+        );
+        when_trans.assert_zero(
+            gate.clone() * next_is_ec.clone() * (next_bind_active.clone() - bind_active.clone()),
+        );
+
+        when_trans.assert_zero(
+            gate.clone()
+                * next_is_ec.clone()
+                * not_last.clone()
+                * (next_scalar_acc
+                    - (scalar_acc.clone() * AB::Expr::from_u64(2) + next[BIT].clone().into())),
+        );
+        when_trans.assert_zero(
+            gate.clone()
+                * next_is_ec.clone()
+                * is_last.clone()
+                * (next[EC_SCALAR_ACC].clone().into() - next[BIT].clone().into()),
+        );
+
+        // Base point must stay fixed within a phase.
+        for i in 0..5 {
+            when_trans.assert_zero(
+                gate.clone()
+                    * next_is_ec.clone()
+                    * not_last.clone()
+                    * (next_base_x[i].clone() - base_x[i].clone()),
+            );
+            when_trans.assert_zero(
+                gate.clone()
+                    * next_is_ec.clone()
+                    * not_last.clone()
+                    * (next_base_z[i].clone() - base_z[i].clone()),
+            );
+            when_trans.assert_zero(
+                gate.clone()
+                    * next_is_ec.clone()
+                    * not_last.clone()
+                    * (next_base_u[i].clone() - base_u[i].clone()),
+            );
+            when_trans.assert_zero(
+                gate.clone()
+                    * next_is_ec.clone()
+                    * not_last.clone()
+                    * (next_base_t[i].clone() - base_t[i].clone()),
+            );
+        }
+
+        // Each new phase must restart from the neutral accumulator.
+        for i in 0..5 {
+            when_trans.assert_zero(
+                gate.clone() * next_is_ec.clone() * is_last.clone() * next_acc_x[i].clone(),
+            );
+            when_trans.assert_zero(
+                gate.clone() * next_is_ec.clone() * is_last.clone() * next_acc_u[i].clone(),
+            );
+        }
+        when_trans.assert_zero(
+            gate.clone()
+                * next_is_ec.clone()
+                * is_last.clone()
+                * (next_acc_z[0].clone() - AB::Expr::ONE),
+        );
+        when_trans.assert_zero(
+            gate.clone()
+                * next_is_ec.clone()
+                * is_last.clone()
+                * (next_acc_t[0].clone() - AB::Expr::ONE),
+        );
+        for i in 1..5 {
+            when_trans.assert_zero(
+                gate.clone() * next_is_ec.clone() * is_last.clone() * next_acc_z[i].clone(),
+            );
+            when_trans.assert_zero(
+                gate.clone() * next_is_ec.clone() * is_last.clone() * next_acc_t[i].clone(),
+            );
+        }
     }
 }
 
@@ -436,25 +587,19 @@ fn eval_ec_constraints<AB: MidenAirBuilder>(
 /// Maximum constraint degree: 4
 ///   x7 verification: gate(1) * (x7 - x3^2*x6)(3) = degree 4
 ///   transition: both_p2(2) * (next_state - linear(x7))(2) = degree 4
-fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
+fn eval_poseidon2_constraints<AB: AirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
     gate: &AB::Expr,
-    _constants: &poseidon2::Poseidon2Constants,
+    constants: &poseidon2::Poseidon2Constants,
 ) {
-    // gate = IS_P2 (binary, degree 1)
-
-    // Current row's Poseidon2 state (before this round).
     let state: Vec<AB::Expr> = (0..poseidon2::WIDTH)
         .map(|i| local[P2_STATE + i].clone().into())
         .collect();
-    // Next row's state (should equal the result after applying this round).
     let next_state: Vec<AB::Expr> = (0..poseidon2::WIDTH)
         .map(|i| next[P2_STATE + i].clone().into())
         .collect();
-
-    // S-box intermediates: x2 = s (activated state), x3 = s^2, x6 = s^3, x7 = s^7
     let x2: Vec<AB::Expr> = (0..poseidon2::WIDTH)
         .map(|i| local[P2_SBOX_X2 + i].clone().into())
         .collect();
@@ -467,47 +612,99 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
     let x7: Vec<AB::Expr> = (0..poseidon2::WIDTH)
         .map(|i| local[P2_SBOX_X7 + i].clone().into())
         .collect();
-
-    // round_type: 0 = full round, 1 = partial round (binary)
+    let round: AB::Expr = local[P2_ROUND].clone().into();
     let round_type: AB::Expr = local[P2_ROUND_TYPE].clone().into();
+    let perm_id: AB::Expr = local[P2_PERM_ID].clone().into();
+    let selectors: Vec<AB::Expr> = (0..P2_ROUND_SEL_COUNT)
+        .map(|i| local[P2_ROUND_SEL + i].clone().into())
+        .collect();
+    let k_selectors: Vec<AB::Expr> = (0..P2_K_SEL_COUNT)
+        .map(|i| local[P2_K_SEL + i].clone().into())
+        .collect();
 
-    // Constrain round_type is binary
+    let mut selector_sum = AB::Expr::ZERO;
+    for sel in &selectors {
+        selector_sum = selector_sum + sel.clone();
+        builder.assert_zero(gate.clone() * sel.clone() * (sel.clone() - AB::Expr::ONE));
+    }
+    builder.assert_zero(selector_sum - gate.clone());
+
+    let mut expected_round = AB::Expr::ZERO;
+    let mut expected_round_type = AB::Expr::ZERO;
+    for (r, sel) in selectors.iter().enumerate() {
+        expected_round = expected_round + sel.clone() * AB::Expr::from_u64(r as u64);
+        let is_partial_round = if (poseidon2::ROUNDS_F_HALF
+            ..poseidon2::ROUNDS_F_HALF + poseidon2::ROUNDS_P)
+            .contains(&r)
+        {
+            1
+        } else {
+            0
+        };
+        expected_round_type =
+            expected_round_type + sel.clone() * AB::Expr::from_u64(is_partial_round);
+    }
+
+    builder.assert_zero(gate.clone() * (round.clone() - expected_round));
+    builder.assert_zero(gate.clone() * (round_type.clone() - expected_round_type.clone()));
     builder.assert_zero(gate.clone() * round_type.clone() * (round_type.clone() - AB::Expr::ONE));
 
-    // Selectors (degree 1 each)
+    for sel in &k_selectors {
+        builder.assert_zero(sel.clone() * (sel.clone() - AB::Expr::ONE));
+    }
+
     let is_partial = round_type.clone();
     let is_full = AB::Expr::ONE - round_type.clone();
 
-    // ============================================================
-    // S-box intermediate constraints
-    // x3[i] = x2[i]^2, x6[i] = x2[i]*x3[i], x7[i] = x3[i]^2*x6[i]
-    // All gated by IS_P2. In partial rounds, elements 1-7 have zero
-    // intermediates (identity passthrough).
-    // Max degree: gate(1) * (x7 - x3^2*x6)(3) = 4
-    // ============================================================
+    for i in 0..poseidon2::WIDTH {
+        let mut expected_x2 = AB::Expr::ZERO;
+        for (r, sel) in selectors.iter().enumerate() {
+            let round_term = if r < poseidon2::ROUNDS_F_HALF {
+                state[i].clone()
+                    + AB::Expr::from_u64(p3_field::PrimeField64::as_canonical_u64(
+                        &constants.external_rc[r][i],
+                    ))
+            } else if r < poseidon2::ROUNDS_F_HALF + poseidon2::ROUNDS_P {
+                if i == 0 {
+                    state[0].clone()
+                        + AB::Expr::from_u64(p3_field::PrimeField64::as_canonical_u64(
+                            &constants.internal_rc[r - poseidon2::ROUNDS_F_HALF],
+                        ))
+                } else {
+                    AB::Expr::ZERO
+                }
+            } else {
+                state[i].clone()
+                    + AB::Expr::from_u64(p3_field::PrimeField64::as_canonical_u64(
+                        &constants.external_rc[r - poseidon2::ROUNDS_P][i],
+                    ))
+            };
+            expected_x2 = expected_x2 + sel.clone() * round_term;
+        }
+        builder.assert_zero(gate.clone() * (x2[i].clone() - expected_x2));
+    }
+
     for i in 0..poseidon2::WIDTH {
         if i == 0 {
-            // Element 0 always goes through S-box (both full and partial rounds)
             builder.assert_zero(gate.clone() * (x3[0].clone() - x2[0].clone() * x2[0].clone()));
             builder.assert_zero(gate.clone() * (x6[0].clone() - x2[0].clone() * x3[0].clone()));
-            // x7[0] = x3[0]^2 * x6[0]. Degree: gate(1) * (x3^2*x6)(3) = 4
-            builder.assert_zero(gate.clone() * (x7[0].clone() - x3[0].clone() * x3[0].clone() * x6[0].clone()));
+            builder.assert_zero(
+                gate.clone() * (x7[0].clone() - x3[0].clone() * x3[0].clone() * x6[0].clone()),
+            );
         } else {
-            // Elements 1..7: S-box in full rounds, identity in partial rounds.
-            // In partial rounds these constraints force x3[i]=0, x6[i]=0.
-            builder.assert_zero(gate.clone() * (
-                is_full.clone() * (x3[i].clone() - x2[i].clone() * x2[i].clone())
-                + is_partial.clone() * x3[i].clone()
-            ));
-            builder.assert_zero(gate.clone() * (
-                is_full.clone() * (x6[i].clone() - x2[i].clone() * x3[i].clone())
-                + is_partial.clone() * x6[i].clone()
-            ));
-            // x7[i] = x3[i]^2 * x6[i]. No is_full selector needed because in
-            // partial rounds x3[i]=x6[i]=0 (forced above), so x3^2*x6=0 and
-            // the constraint reduces to x7[i]=0 automatically.
-            // Degree: gate(1) * (x3^2*x6)(3) = 4 (not 5!)
-            builder.assert_zero(gate.clone() * (x7[i].clone() - x3[i].clone() * x3[i].clone() * x6[i].clone()));
+            builder.assert_zero(
+                gate.clone()
+                    * (is_full.clone() * (x3[i].clone() - x2[i].clone() * x2[i].clone())
+                        + is_partial.clone() * x3[i].clone()),
+            );
+            builder.assert_zero(
+                gate.clone()
+                    * (is_full.clone() * (x6[i].clone() - x2[i].clone() * x3[i].clone())
+                        + is_partial.clone() * x6[i].clone()),
+            );
+            builder.assert_zero(
+                gate.clone() * (x7[i].clone() - x3[i].clone() * x3[i].clone() * x6[i].clone()),
+            );
         }
     }
 
@@ -531,14 +728,14 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
     let mat4 = |a: &AB::Expr, b: &AB::Expr, c: &AB::Expr, d: &AB::Expr| -> [AB::Expr; 4] {
         let t0 = a.clone() + b.clone();
         let t1 = c.clone() + d.clone();
-        let t2 = b.clone() + b.clone() + t1.clone();     // 2b + c + d
-        let t3 = d.clone() + d.clone() + t0.clone();     // a + b + 2d
-        let t1_2 = t1.clone() + t1;                       // 2c + 2d
-        let t0_2 = t0.clone() + t0;                       // 2a + 2b
-        let t4 = t1_2.clone() + t1_2 + t3.clone();       // a + b + 4c + 6d
-        let t5 = t0_2.clone() + t0_2 + t2.clone();       // 4a + 6b + c + d
-        let t6 = t3 + t5.clone();                          // 5a + 7b + c + 3d
-        let t7 = t2 + t4.clone();                          // a + 3b + 5c + 7d
+        let t2 = b.clone() + b.clone() + t1.clone(); // 2b + c + d
+        let t3 = d.clone() + d.clone() + t0.clone(); // a + b + 2d
+        let t1_2 = t1.clone() + t1; // 2c + 2d
+        let t0_2 = t0.clone() + t0; // 2a + 2b
+        let t4 = t1_2.clone() + t1_2 + t3.clone(); // a + b + 4c + 6d
+        let t5 = t0_2.clone() + t0_2 + t2.clone(); // 4a + 6b + c + d
+        let t6 = t3 + t5.clone(); // 5a + 7b + c + 3d
+        let t7 = t2 + t4.clone(); // a + 3b + 5c + 7d
         [t6, t5, t7, t4]
     };
 
@@ -564,25 +761,108 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
     }
     let mut partial_next = Vec::with_capacity(poseidon2::WIDTH);
     for i in 0..poseidon2::WIDTH {
-        let val = if i == 0 { x7[0].clone() } else { state[i].clone() };
-        let diag_i = AB::Expr::from_u64(poseidon2::MATRIX_DIAG_8[i] % p3_goldilocks::Goldilocks::ORDER_U64);
+        let val = if i == 0 {
+            x7[0].clone()
+        } else {
+            state[i].clone()
+        };
+        let diag_i = AB::Expr::from_u64(p3_field::PrimeField64::as_canonical_u64(
+            &p3_goldilocks::MATRIX_DIAG_8_GOLDILOCKS[i],
+        ));
         partial_next.push(val * diag_i + partial_sum.clone());
     }
 
-    // Transition constraints (only when next row is also P2)
     {
         let mut when_trans = builder.when_transition();
         let next_is_p2: AB::Expr = next[IS_P2].clone().into();
-        let both_p2 = gate.clone() * next_is_p2; // degree 2
+        let next_round: AB::Expr = next[P2_ROUND].clone().into();
+        let next_perm_id: AB::Expr = next[P2_PERM_ID].clone().into();
+        let next_k_selectors: Vec<AB::Expr> = (0..P2_K_SEL_COUNT)
+            .map(|i| next[P2_K_SEL + i].clone().into())
+            .collect();
+        let both_p2 = gate.clone() * next_is_p2.clone();
 
         for i in 0..poseidon2::WIDTH {
-            // Degree: both_p2(2) * max(is_full(1)*full_next(1), is_partial(1)*partial_next(1)) = 4
             let expected = is_full.clone() * full_next[i].clone()
                 + is_partial.clone() * partial_next[i].clone();
+            when_trans.assert_zero(both_p2.clone() * (next_state[i].clone() - expected));
+        }
+
+        when_trans
+            .assert_zero(both_p2.clone() * (next_round.clone() - round.clone() - AB::Expr::ONE));
+        when_trans.assert_zero(both_p2.clone() * (next_perm_id - perm_id.clone()));
+
+        let current_not_p2 = AB::Expr::ONE - gate.clone();
+        when_trans.assert_zero(current_not_p2 * next_is_p2 * next_round);
+
+        for i in 0..P2_K_SEL_COUNT {
             when_trans.assert_zero(
-                both_p2.clone() * (next_state[i].clone() - expected)
+                both_p2.clone() * (next_k_selectors[i].clone() - k_selectors[i].clone()),
             );
         }
+    }
+
+    {
+        let mut when_trans = builder.when_transition();
+        let next_is_p2: AB::Expr = next[IS_P2].clone().into();
+        let local_to_gap = gate.clone() * (AB::Expr::ONE - next_is_p2.clone());
+        when_trans.assert_zero(
+            local_to_gap.clone()
+                * (round.clone() - AB::Expr::from_u64((poseidon2::TOTAL_ROUNDS - 1) as u64)),
+        );
+        for i in 0..poseidon2::WIDTH {
+            let expected = is_full.clone() * full_next[i].clone()
+                + is_partial.clone() * partial_next[i].clone();
+            when_trans.assert_zero(local_to_gap.clone() * (next_state[i].clone() - expected));
+        }
+        for i in 0..P2_K_SEL_COUNT {
+            when_trans.assert_zero(
+                local_to_gap.clone() * (next[P2_K_SEL + i].clone().into() - k_selectors[i].clone()),
+            );
+            when_trans.assert_zero(
+                local_to_gap.clone()
+                    * k_selectors[i].clone()
+                    * (next[GLOBAL_KS + i].clone().into()
+                        - full_next[0].clone() * is_full.clone()
+                        - partial_next[0].clone() * is_partial.clone()),
+            );
+        }
+    }
+}
+
+fn eval_global_bindings<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], next: &[AB::Var]) {
+    let mut when_trans = builder.when_transition();
+    let is_ec: AB::Expr = local[IS_EC].clone().into();
+    let is_p2: AB::Expr = local[IS_P2].clone().into();
+    let is_bv: AB::Expr = local[IS_BV].clone().into();
+    let next_is_p2: AB::Expr = next[IS_P2].clone().into();
+    for i in 0..GLOBAL_KS_COUNT {
+        when_trans
+            .assert_zero(next[GLOBAL_KS + i].clone().into() - local[GLOBAL_KS + i].clone().into());
+    }
+    for i in 0..GLOBAL_FIELDS_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_FIELDS + i].clone().into() - local[GLOBAL_FIELDS + i].clone().into(),
+        );
+    }
+
+    let current_gap = AB::Expr::ONE - is_ec.clone() - is_p2.clone() - is_bv.clone();
+    when_trans.assert_zero(
+        is_ec.clone() * next_is_p2.clone() * (next[P2_K_SEL].clone().into() - AB::Expr::ONE),
+    );
+    for i in 1..P2_K_SEL_COUNT {
+        when_trans
+            .assert_zero(is_ec.clone() * next_is_p2.clone() * next[P2_K_SEL + i].clone().into());
+    }
+
+    when_trans
+        .assert_zero(current_gap.clone() * next_is_p2.clone() * next[P2_K_SEL].clone().into());
+    for i in 1..P2_K_SEL_COUNT {
+        when_trans.assert_zero(
+            current_gap.clone()
+                * next_is_p2.clone()
+                * (next[P2_K_SEL + i].clone().into() - local[P2_K_SEL + i - 1].clone().into()),
+        );
     }
 }
 
@@ -590,7 +870,7 @@ fn eval_poseidon2_constraints<AB: MidenAirBuilder>(
 // Helper: extract GF(p^5) expression array from row slice
 // ============================================================
 /// Helper: pull a GF(p^5) element from a row slice as symbolic expressions.
-fn gfp5_expr<AB: MidenAirBuilder>(row: &[AB::Var], offset: usize) -> [AB::Expr; 5] {
+fn gfp5_expr<AB: AirBuilder>(row: &[AB::Var], offset: usize) -> [AB::Expr; 5] {
     [
         row[offset].clone().into(),
         row[offset + 1].clone().into(),
@@ -641,7 +921,7 @@ pub fn gfp5_mul_by_kz<F: PrimeCharacteristicRing, E: Algebra<F> + Clone>(
 ///
 /// Maximum constraint degree: 4 (product of gate * mask * inv * diff).
 /// Well within the degree-7 budget.
-fn eval_bv_constraints<AB: MidenAirBuilder>(
+fn eval_bv_constraints<AB: AirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
@@ -657,6 +937,17 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
     let num_fields = col(BV_NUM_FIELDS);
     let min_val = col(BV_MIN_VALUE);
     let max_val = col(BV_MAX_VALUE);
+    let row_selectors: Vec<AB::Expr> = (0..BV_ROW_SEL_COUNT).map(|i| col(BV_ROW_SEL + i)).collect();
+
+    let mut row_sel_sum = AB::Expr::ZERO;
+    let mut expected_row_idx = AB::Expr::ZERO;
+    for (i, sel) in row_selectors.iter().enumerate() {
+        row_sel_sum = row_sel_sum + sel.clone();
+        expected_row_idx = expected_row_idx + sel.clone() * AB::Expr::from_u64(i as u64);
+        builder.assert_zero(gate.clone() * sel.clone() * (sel.clone() - AB::Expr::ONE));
+    }
+    builder.assert_zero(gate.clone() * (row_sel_sum - AB::Expr::ONE));
+    builder.assert_zero(gate.clone() * (row_idx.clone() - expected_row_idx));
 
     // 1. Mask must be binary
     builder.assert_zero(gate.clone() * mask.clone() * (mask.clone() - AB::Expr::ONE));
@@ -667,11 +958,13 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
     // 3. Range-check bits must be binary (48 low + 48 high), gated by mask
     for b in 0..BV_LOW_BITS_COUNT {
         let bit = col(BV_LOW_BITS + b);
-        builder.assert_zero(gate.clone() * mask.clone() * bit.clone() * (bit.clone() - AB::Expr::ONE));
+        builder
+            .assert_zero(gate.clone() * mask.clone() * bit.clone() * (bit.clone() - AB::Expr::ONE));
     }
     for b in 0..BV_HIGH_BITS_COUNT {
         let bit = col(BV_HIGH_BITS + b);
-        builder.assert_zero(gate.clone() * mask.clone() * bit.clone() * (bit.clone() - AB::Expr::ONE));
+        builder
+            .assert_zero(gate.clone() * mask.clone() * bit.clone() * (bit.clone() - AB::Expr::ONE));
     }
 
     // 5. Exponent bits must be binary
@@ -681,6 +974,16 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
     }
 
     let field_val_this_row = col(BV_SQ); // sq[0] = the field value on this row
+    let mut selected_field = AB::Expr::ZERO;
+    for j in 0..NUM_FIELDS {
+        selected_field = selected_field + row_selectors[j].clone() * col(BV_FIELDS + j);
+        builder.assert_zero(gate.clone() * (col(BV_FIELDS + j) - col(GLOBAL_FIELDS + j)));
+    }
+    builder.assert_zero(
+        gate.clone()
+            * (AB::Expr::ONE - row_selectors[NUM_FIELDS].clone())
+            * (field_val_this_row.clone() - selected_field),
+    );
 
     // 4. Range check recomposition
     let mut low_recomp = AB::Expr::ZERO;
@@ -696,16 +999,16 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
         pow2 = pow2 * AB::Expr::from_u64(2);
     }
     builder.assert_zero(
-        gate.clone() * mask.clone() * (low_recomp - (field_val_this_row.clone() - min_val.clone()))
+        gate.clone() * mask.clone() * (low_recomp - (field_val_this_row.clone() - min_val.clone())),
     );
     builder.assert_zero(
-        gate.clone() * mask.clone() * (high_recomp - (max_val.clone() - field_val_this_row.clone()))
+        gate.clone()
+            * mask.clone()
+            * (high_recomp - (max_val.clone() - field_val_this_row.clone())),
     );
 
     // Inactive fields must have sq[0] = 0
-    builder.assert_zero(
-        gate.clone() * (AB::Expr::ONE - mask.clone()) * field_val_this_row.clone()
-    );
+    builder.assert_zero(gate.clone() * (AB::Expr::ONE - mask.clone()) * field_val_this_row.clone());
 
     // 6. Exponent bit recomposition: sum(exp_bit[b] * 2^b) = cost_exponent
     let mut exp_recomp = AB::Expr::ZERO;
@@ -738,160 +1041,18 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
         let this_acc = col(BV_ACC + k);
         let inter = col(BV_ACC_INTER + k - 1); // stored: acc[k-1] * eb[k]
         // Verify intermediate: inter = prev_acc * ebk (degree 2, gated = 4)
-        builder.assert_zero(gate.clone() * mask.clone() * (inter.clone() - prev_acc.clone() * ebk.clone()));
+        builder.assert_zero(
+            gate.clone() * mask.clone() * (inter.clone() - prev_acc.clone() * ebk.clone()),
+        );
         // Accumulator: acc[k] = prev_acc + inter * (sqk - 1) (degree 2, gated = 4)
-        builder.assert_zero(gate.clone() * mask.clone() * (this_acc - prev_acc - inter * (sqk - AB::Expr::ONE)));
+        builder.assert_zero(
+            gate.clone() * mask.clone() * (this_acc - prev_acc - inter * (sqk - AB::Expr::ONE)),
+        );
     }
 
     // Power result = acc[7]
     builder.assert_zero(
-        gate.clone() * mask.clone() * (col(BV_POWER) - col(BV_ACC + BV_ACC_COUNT - 1))
-    );
-
-    // DEBUG: skip uniqueness, cost_sum, config consistency for now
-    return;
-    // Low: sum(low_bit[b] * 2^b) = field[row_idx] - min_value
-    // High: sum(high_bit[b] * 2^b) = max_value - field[row_idx]
-    //
-    // We use the field value at BV_FIELDS + row_index. But row_index is
-    // a variable, so we can't directly index. Instead, we use a trick:
-    // on each field row i, the trace stores the field value directly at
-    // a known position. We reconstruct using the sum of mask * field[j] * (row_idx == j).
-    //
-    // Simpler approach: the trace generator puts the "current" field value
-    // in the bit recomposition. We verify the recomposition matches, and
-    // separately constrain that inactive fields have zero bits.
-    // ------------------------------------------------
-
-    // Recompose low bits into a single value
-    let mut low_recomp = AB::Expr::ZERO;
-    let mut pow2 = AB::Expr::ONE;
-    for b in 0..BV_LOW_BITS_COUNT {
-        low_recomp = low_recomp + pow2.clone() * col(BV_LOW_BITS + b);
-        pow2 = pow2 * AB::Expr::from_u64(2);
-    }
-
-    // Recompose high bits
-    let mut high_recomp = AB::Expr::ZERO;
-    pow2 = AB::Expr::ONE;
-    for b in 0..BV_HIGH_BITS_COUNT {
-        high_recomp = high_recomp + pow2.clone() * col(BV_HIGH_BITS + b);
-        pow2 = pow2 * AB::Expr::from_u64(2);
-    }
-
-    // For the field row i, the field value is at BV_FIELDS + i.
-    // We build a "selected value" using the mask and row index.
-    // For simplicity, we sum over all field positions weighted by an indicator.
-    // This works because on row i with mask=1, exactly one field is "selected."
-    //
-    // selected_val = sum_j(field[j] * indicator(row_idx == j))
-    // where indicator uses the Lagrange basis approach.
-    //
-    // Actually, to keep degrees low, we store the current field value
-    // as the recomposition target. The constraint is:
-    //   mask * (low_recomp - (field[i] - min)) = 0
-    //   mask * (high_recomp - (max - field[i])) = 0
-    // We need to identify field[i]. Since row_index selects which field,
-    // and all 8 field values are stored, we construct the selection polynomial.
-
-    // Build selected field value: sum over j of field[j] * L_j(row_idx)
-    // where L_j is 1 when row_idx = j and 0 otherwise.
-    // L_j(x) = product_{k != j} (x - k) / (j - k)
-    // This is degree 7 which is too high with gating.
-    //
-    // Alternative: the low_recomp + min should equal one of the field values.
-    // Constrain: mask * (low_recomp + min - field[row_idx]) = 0
-    // We can do this without Lagrange by instead constraining:
-    //   mask * product_{j=0..7} (low_recomp + min - field[j]) = 0
-    // This proves that (low_recomp + min) equals at least one field value.
-    // But that's degree 8 * mask = degree 9. Too high.
-    //
-    // Pragmatic approach: we store the "current field value" redundantly
-    // in a dedicated column and verify it matches field[row_idx] using
-    // per-index constraints. Actually the simplest: constrain the recomposition
-    // to match the specific field value using the row index.
-    //
-    // Since row_index is 0..7 and known at trace time, and the constraint
-    // evaluator works over the entire trace algebraically, we can't branch.
-    // The standard STARK trick: use an accumulator that builds up field[row_idx].
-    //
-    // SIMPLEST CORRECT APPROACH: the trace stores the selected field value
-    // at BV_POWER column (which already holds field^exp), and we constrain
-    // the power chain starting from that value. The range check bits
-    // recompose to (value - min) and (max - value), where value = sq[0].
-    // So sq[0] IS the field value for this row.
-
-    let field_val_this_row = col(BV_SQ); // sq[0] = the field value being checked
-
-    // Range check: low_recomp = sq[0] - min_value (when mask=1)
-    builder.assert_zero(
-        gate.clone() * mask.clone() * (low_recomp - (field_val_this_row.clone() - min_val.clone()))
-    );
-    // Range check: high_recomp = max_value - sq[0] (when mask=1)
-    builder.assert_zero(
-        gate.clone() * mask.clone() * (high_recomp - (max_val.clone() - field_val_this_row.clone()))
-    );
-
-    // Inactive fields must be zero
-    builder.assert_zero(
-        gate.clone() * (AB::Expr::ONE - mask.clone()) * field_val_this_row.clone()
-    );
-
-    // ------------------------------------------------
-    // 5. Exponent bits must be binary
-    // ------------------------------------------------
-    for b in 0..BV_EXP_BITS_COUNT {
-        let bit = col(BV_EXP_BITS + b);
-        builder.assert_zero(gate.clone() * bit.clone() * (bit.clone() - AB::Expr::ONE));
-    }
-
-    // ------------------------------------------------
-    // 6. Exponent bit recomposition: sum(exp_bit[b] * 2^b) = cost_exponent
-    // ------------------------------------------------
-    let mut exp_recomp = AB::Expr::ZERO;
-    pow2 = AB::Expr::ONE;
-    for b in 0..BV_EXP_BITS_COUNT {
-        exp_recomp = exp_recomp + pow2.clone() * col(BV_EXP_BITS + b);
-        pow2 = pow2 * AB::Expr::from_u64(2);
-    }
-    builder.assert_zero(gate.clone() * mask.clone() * (exp_recomp - col(BV_COST_EXP)));
-
-    // ------------------------------------------------
-    // 7. Squaring chain: sq[0] = field_value, sq[k] = sq[k-1]^2
-    // ------------------------------------------------
-    for k in 1..BV_SQ_COUNT {
-        let prev_sq = col(BV_SQ + k - 1);
-        let this_sq = col(BV_SQ + k);
-        builder.assert_zero(gate.clone() * mask.clone() * (this_sq - prev_sq.clone() * prev_sq));
-    }
-
-    // ------------------------------------------------
-    // 8. Accumulator chain for binary exponentiation
-    // acc[0] = exp_bit[0] * sq[0] + (1 - exp_bit[0])
-    // acc[k] = acc[k-1] * (exp_bit[k] * sq[k] + (1 - exp_bit[k]))
-    // ------------------------------------------------
-    {
-        let eb0 = col(BV_EXP_BITS);
-        let sq0 = col(BV_SQ);
-        let acc0 = col(BV_ACC);
-        // acc[0] = eb0 * sq0 + 1 - eb0 = 1 + eb0 * (sq0 - 1)
-        let expected_acc0 = AB::Expr::ONE + eb0.clone() * (sq0.clone() - AB::Expr::ONE);
-        builder.assert_zero(gate.clone() * mask.clone() * (acc0 - expected_acc0));
-    }
-    for k in 1..BV_ACC_COUNT {
-        let prev_acc = col(BV_ACC + k - 1);
-        let ebk = col(BV_EXP_BITS + k);
-        let sqk = col(BV_SQ + k);
-        let this_acc = col(BV_ACC + k);
-        // selector = 1 + ebk * (sqk - 1)
-        let selector = AB::Expr::ONE + ebk.clone() * (sqk.clone() - AB::Expr::ONE);
-        // acc[k] = acc[k-1] * selector
-        builder.assert_zero(gate.clone() * mask.clone() * (this_acc - prev_acc * selector));
-    }
-
-    // Power result = acc[7]
-    builder.assert_zero(
-        gate.clone() * mask.clone() * (col(BV_POWER) - col(BV_ACC + BV_ACC_COUNT - 1))
+        gate.clone() * mask.clone() * (col(BV_POWER) - col(BV_ACC + BV_ACC_COUNT - 1)),
     );
 
     // ------------------------------------------------
@@ -928,14 +1089,17 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
         let next_is_bv: AB::Expr = next[IS_BV].clone().into();
         let next_mask: AB::Expr = next[BV_MASK].clone().into();
         let next_power: AB::Expr = next[BV_POWER].clone().into();
-        let next_cost_sum: AB::Expr = next[BV_COST_SUM].clone().into();
+        let next_is_bounds: AB::Expr = next[BV_IS_BOUNDS].clone().into();
+        let next_running_total = next_is_bounds.clone() * next[BV_BOUNDS_COST].clone().into()
+            + (AB::Expr::ONE - next_is_bounds) * next[BV_COST_SUM].clone().into();
         let current_cost_sum = col(BV_COST_SUM);
 
         // Transition: next_cost_sum = current_cost_sum + next_mask * next_power
         // Only when both rows are BV (gate * next_is_bv)
         builder.when_transition().assert_zero(
-            gate.clone() * next_is_bv.clone() *
-            (next_cost_sum - current_cost_sum - next_mask * next_power)
+            gate.clone()
+                * next_is_bv.clone()
+                * (next_running_total - current_cost_sum - next_mask * next_power),
         );
     }
 
@@ -945,76 +1109,9 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
     // Constraint: gate * (1 - row_idx) * (cost_sum - mask * power) = 0
     // When row_idx = 0, this forces cost_sum = mask * power.
     // When row_idx > 0, (1 - row_idx) is non-zero but the transition handles it.
-    // Actually, using (1 - row_idx) as a selector isn't right because it's non-zero
-    // for row_idx > 1 too (it just has a different value).
-    //
-    // Better: the transition constraint plus the first BV row constraint.
-    // We can use a different trick: constrain that on the row BEFORE the first
-    // BV row, cost_sum = 0. But that's on a P2 or padding row.
-    //
-    // Simplest: constrain that cost_sum[row_idx=0] = mask * power on the first
-    // BV row. We can identify it via: row_idx * (cost_sum - mask * power) ... no.
-    //
-    // OK, just constrain: when row_idx = 0 (i.e., the row_idx column is 0):
-    //   gate * is_first_bv * (cost_sum - mask * power) = 0
-    // where is_first_bv = 1 - row_idx * inv_row_idx (IsZero pattern).
-    //
-    // Actually, the transition constraint already handles this if we ensure
-    // the "previous cost_sum" is 0 before the first BV row. Since the previous
-    // row is a P2 or padding row where all BV columns are 0 (including cost_sum),
-    // the transition won't fire (prev IS_BV = 0). So the first BV row's
-    // cost_sum is unconstrained by transitions.
-    //
-    // Fix: add a boundary constraint. On the first BV row (row_idx = 0):
-    //   cost_sum = mask * power
-    // We encode this as: gate * row_idx_is_zero * (cost_sum - mask * power) = 0
-    // where row_idx_is_zero = (row_idx == 0) indicator.
-    //
-    // Since row_idx is 0 on the first BV row and 1..8 on others, we can use:
-    //   product_{k=1..8} (row_idx - k) which is nonzero only when row_idx=0.
-    // But that's degree 8. Way too high with gating.
-    //
-    // PRAGMATIC: constrain on all rows that cost_sum = expected, where expected
-    // is tracked via the transition. Make the transition also handle row_idx=0.
-    //
-    // The trick: modify the transition to handle the "no previous row" case.
-    // On the first BV row, the previous row is NOT a BV row (IS_BV=0 on prev).
-    // So cost_sum on the first BV row should equal mask * power (fresh start).
-    //
-    // Constraint: for the CURRENT row, if the PREVIOUS row was not BV
-    // (i.e., this is the first BV row), cost_sum = mask * power.
-    // We check this by looking at the NEXT row from the PREVIOUS row's perspective.
-    //
-    // Actually, it's simpler: from the current row's perspective, we can't see
-    // the previous row. We only have local and next.
-    //
-    // SOLUTION: Use a "when_first_row" or boundary approach. The cost_sum
-    // accumulation constraint between BV rows is already handled. For the
-    // FIRST BV row, we add: when IS_BV=1 and the NEXT row's IS_BV was also
-    // preceded by... this is circular.
-    //
-    // LET'S KEEP IT SIMPLE: just enforce:
-    //   On every BV field row: cost_sum = sum(mask[j] * power[j], j=0..row_idx)
-    // The transition constraint already ensures consistency between consecutive
-    // BV rows. The first BV row's cost_sum is set by the prover and the
-    // transition propagates it. We need ONE anchor point.
-    //
-    // Use the bounds row (row_idx = NUM_FIELDS) to anchor: on the bounds row,
-    // BV_BOUNDS_COST must equal BV_COST_SUM from the previous (last field) row.
-    // But we can't look backward.
-    //
-    // OK here's what I'll do: Trust the transition constraint and add a simple
-    // anchor. The bounds row has its own BV_COST_SUM that should equal
-    // the accumulated total. The transition from row 7 -> bounds row propagates it.
-    // For row 0, I add: gate * (1 - row_idx) * ... but this is wrong for row_idx > 1.
-    //
-    // Actually, the key insight: row_idx goes 0,1,2,...,7,8. On the field rows
-    // (0..7) the transition increments cost_sum. I need the initial value.
-    // I'll add a column or use a trick.
-    //
-    // PRAGMATIC FIX: check from the transition that when the NEXT row is BV
-    // and the CURRENT row is NOT BV, the next row's cost_sum = next_mask * next_power.
-    // This catches the P2-to-BV boundary.
+    // Anchor the BV accumulator at the first BV row. The transition constraints
+    // handle BV-to-BV propagation; this entry constraint handles the row where
+    // the trace crosses from a non-BV section into ballot validation.
     {
         let next_is_bv: AB::Expr = next[IS_BV].clone().into();
         let not_current_bv = AB::Expr::ONE - gate.clone();
@@ -1024,9 +1121,9 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
 
         // When current row is NOT BV but next row IS BV (the BV entry point):
         // next_cost_sum must equal next_mask * next_power (fresh accumulation start).
-        builder.when_transition().assert_zero(
-            not_current_bv * next_is_bv * (next_cost_sum - next_mask * next_power)
-        );
+        builder
+            .when_transition()
+            .assert_zero(not_current_bv * next_is_bv * (next_cost_sum - next_mask * next_power));
     }
 
     // ------------------------------------------------
@@ -1044,6 +1141,7 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
 
         // BV_IS_BOUNDS and mask are mutually exclusive (bounds row has mask=0)
         builder.assert_zero(gate.clone() * is_bounds.clone() * mask.clone());
+        builder.assert_zero(gate.clone() * (is_bounds.clone() - row_selectors[NUM_FIELDS].clone()));
 
         // 12a. Limit decomposition: BV_LIMIT_BITS represent (limit - cost_sum)
         // Prove limit >= cost_sum by showing the difference is a 63-bit value.
@@ -1062,7 +1160,7 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
         }
         // limit_recomp == limit - cost_sum (proves limit >= cost_sum)
         builder.assert_zero(
-            bounds_with_limit.clone() * (limit_recomp - (col(BV_LIMIT) - col(BV_BOUNDS_COST)))
+            bounds_with_limit.clone() * (limit_recomp - (col(BV_LIMIT) - col(BV_BOUNDS_COST))),
         );
 
         // 12b. Min sum decomposition: BV_MINSUB_BITS represent (cost_sum - min_sum)
@@ -1077,7 +1175,7 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
         }
         // minsub_recomp == cost_sum - min_sum (proves cost_sum >= min_sum)
         builder.assert_zero(
-            bounds_gate.clone() * (minsub_recomp - (col(BV_BOUNDS_COST) - col(BV_MIN_SUM)))
+            bounds_gate.clone() * (minsub_recomp - (col(BV_BOUNDS_COST) - col(BV_MIN_SUM))),
         );
 
         // 12c. Group size check: gs_bits decompose (num_fields - group_size)
@@ -1091,18 +1189,17 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
             pow2 = pow2 * AB::Expr::from_u64(2);
         }
         builder.assert_zero(
-            bounds_gate.clone() * (gs_recomp - (col(BV_NUM_FIELDS) - col(BV_GROUP_SIZE)))
+            bounds_gate.clone() * (gs_recomp - (num_fields.clone() - col(BV_GROUP_SIZE))),
         );
 
         // 12d. Limit selection: limit = cost_from_weight ? weight : max_value_sum
         // Constraint: limit = cost_from_weight * weight + (1 - cost_from_weight) * max_sum
         let cfw: AB::Expr = col(BV_COST_FROM_WEIGHT).into();
         builder.assert_zero(
-            bounds_gate.clone() * (
-                col(BV_LIMIT)
-                - cfw.clone() * col(BV_WEIGHT)
-                - (AB::Expr::ONE - cfw) * col(BV_MAX_SUM)
-            )
+            bounds_gate.clone()
+                * (col(BV_LIMIT)
+                    - cfw.clone() * col(BV_WEIGHT)
+                    - (AB::Expr::ONE - cfw) * col(BV_MAX_SUM)),
         );
 
         // 12e. max_sum_is_zero correctness
@@ -1111,19 +1208,13 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
         builder.assert_zero(bounds_gate.clone() * max_sum_is_zero.clone() * col(BV_MAX_SUM));
         // max_sum * inv - (1 - is_zero) = 0
         builder.assert_zero(
-            bounds_gate.clone() * (
-                col(BV_MAX_SUM) * col(BV_MAX_SUM_INV)
-                - (AB::Expr::ONE - max_sum_is_zero.clone())
-            )
+            bounds_gate.clone()
+                * (col(BV_MAX_SUM) * col(BV_MAX_SUM_INV)
+                    - (AB::Expr::ONE - max_sum_is_zero.clone())),
         );
         // max_sum_is_zero must be binary
         builder.assert_zero(
-            bounds_gate.clone() * max_sum_is_zero.clone() * (max_sum_is_zero - AB::Expr::ONE)
-        );
-
-        // 12f. Bounds cost must match cost_sum (accumulated from field rows)
-        builder.assert_zero(
-            bounds_gate * (col(BV_BOUNDS_COST) - col(BV_COST_SUM))
+            bounds_gate.clone() * max_sum_is_zero.clone() * (max_sum_is_zero - AB::Expr::ONE),
         );
     }
 
@@ -1134,23 +1225,54 @@ fn eval_bv_constraints<AB: MidenAirBuilder>(
     // ------------------------------------------------
     {
         let next_is_bv: AB::Expr = next[IS_BV].clone().into();
+        let next_row_selectors: Vec<AB::Expr> = (0..BV_ROW_SEL_COUNT)
+            .map(|i| next[BV_ROW_SEL + i].clone().into())
+            .collect();
         let config_cols = [
-            BV_NUM_FIELDS, BV_MIN_VALUE, BV_MAX_VALUE, BV_UNIQUE,
-            BV_COST_FROM_WEIGHT, BV_COST_EXP, BV_MAX_SUM, BV_MIN_SUM,
-            BV_WEIGHT, BV_GROUP_SIZE,
+            BV_NUM_FIELDS,
+            BV_MIN_VALUE,
+            BV_MAX_VALUE,
+            BV_UNIQUE,
+            BV_COST_FROM_WEIGHT,
+            BV_COST_EXP,
+            BV_MAX_SUM,
+            BV_MIN_SUM,
+            BV_WEIGHT,
+            BV_GROUP_SIZE,
         ];
         for &c in &config_cols {
-            builder.when_transition().assert_zero(
-                gate.clone() * next_is_bv.clone() * (ncol(c) - col(c))
-            );
+            builder
+                .when_transition()
+                .assert_zero(gate.clone() * next_is_bv.clone() * (ncol(c) - col(c)));
         }
 
         // Field values must be consistent across BV rows
         for j in 0..NUM_FIELDS {
             builder.when_transition().assert_zero(
-                gate.clone() * next_is_bv.clone() * (ncol(BV_FIELDS + j) - col(BV_FIELDS + j))
+                gate.clone() * next_is_bv.clone() * (ncol(BV_FIELDS + j) - col(BV_FIELDS + j)),
+            );
+        }
+
+        for i in 0..BV_ROW_SEL_COUNT {
+            let expected_next = if i == 0 {
+                AB::Expr::ZERO
+            } else {
+                row_selectors[i - 1].clone()
+            };
+            builder.when_transition().assert_zero(
+                gate.clone() * next_is_bv.clone() * (next_row_selectors[i].clone() - expected_next),
+            );
+        }
+
+        builder.when_transition().assert_zero(
+            (AB::Expr::ONE - gate.clone())
+                * next_is_bv.clone()
+                * (next_row_selectors[0].clone() - AB::Expr::ONE),
+        );
+        for i in 1..BV_ROW_SEL_COUNT {
+            builder.when_transition().assert_zero(
+                (AB::Expr::ONE - gate.clone()) * next_is_bv.clone() * next_row_selectors[i].clone(),
             );
         }
     }
 }
-

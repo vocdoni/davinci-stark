@@ -1,23 +1,12 @@
-//! Trace generation for the ballot proof STARK.
+//! Trace generation for the browser ballot prover.
 //!
-//! This module builds the execution trace: a big matrix of Goldilocks values
-//! that the STARK prover commits to and proves satisfies the AIR constraints.
-//!
-//! The main entry point is `generate_full_ballot_trace`, which takes all the
-//! ballot inputs (votes, encryption key, process ID, etc.) and produces:
-//!   1. The trace matrix (4096 x 180 Goldilocks elements)
-//!   2. The public values vector (9 elements)
-//!   3. Computed outputs (C1/C2 points, vote_id, inputs_hash, derived keys)
-//!
-//! The trace has three sections:
-//!   - EC rows: 24 scalar multiplications (8 fields x 3 ops each)
-//!   - P2 rows: ~40 Poseidon2 permutations (k-chain + vote ID + inputs hash)
-//!   - Padding: zero-constraint filler to reach the next power of 2
+//! `generate_full_ballot_trace` builds the execution trace, public values, and
+//! derived ballot outputs for the single proving statement used by this crate.
 
 use ecgfp5::curve::Point;
 use ecgfp5::scalar::Scalar;
-use p3_goldilocks::Goldilocks;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_goldilocks::Goldilocks;
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::air::*;
@@ -25,8 +14,7 @@ use crate::columns::*;
 use crate::ecgfp5_ops::fill_scalar_mul_row;
 use crate::poseidon2::{self, Poseidon2Constants, Poseidon2Trace};
 
-/// Extract bit i from a 320-bit scalar (stored as [u64; 5]).
-/// Extract bit `bit_index` from a 320-bit scalar (stored as five u64 limbs).
+/// Extract bit `bit_index` from a 320-bit scalar stored as five u64 limbs.
 /// Returns 0 or 1 as a u64.
 fn scalar_bit(s: &Scalar, bit_index: usize) -> u64 {
     let word = bit_index / 64;
@@ -48,9 +36,12 @@ pub fn generate_scalar_mul_trace_nbits(
     base_point: &Point,
     phase: u64,
     num_bits: usize,
+    bind_active: bool,
+    scalar_target: u64,
 ) -> (Vec<Goldilocks>, Point) {
     let mut rows = vec![Goldilocks::ZERO; num_bits * TRACE_WIDTH];
     let mut acc = Point::NEUTRAL;
+    let mut scalar_acc = 0u64;
 
     for i in 0..num_bits {
         let bit_idx = num_bits - 1 - i;
@@ -63,6 +54,15 @@ pub fn generate_scalar_mul_trace_nbits(
 
         row[IS_EC] = Goldilocks::ONE;
         row[IS_P2] = Goldilocks::ZERO;
+        if bind_active {
+            scalar_acc = scalar_acc.wrapping_mul(2).wrapping_add(bit);
+            row[EC_BIND_ACTIVE] = Goldilocks::ONE;
+            row[EC_SCALAR_ACC] = Goldilocks::from_u64(scalar_acc);
+            row[EC_SCALAR_TARGET] = Goldilocks::from_u64(scalar_target);
+            if (phase as usize) < EC_PHASE_SEL_COUNT {
+                row[EC_PHASE_SEL + phase as usize] = Goldilocks::ONE;
+            }
+        }
 
         if i == num_bits - 1 {
             row[IS_LAST_IN_PHASE] = Goldilocks::ONE;
@@ -72,15 +72,6 @@ pub fn generate_scalar_mul_trace_nbits(
     }
 
     (rows, acc)
-}
-
-/// Generate a single scalar multiplication trace with full 319-bit scalar.
-pub fn generate_scalar_mul_trace(
-    scalar: &Scalar,
-    base_point: &Point,
-    phase: u64,
-) -> (Vec<Goldilocks>, Point) {
-    generate_scalar_mul_trace_nbits(scalar, base_point, phase, SCALAR_BITS)
 }
 
 /// All inputs needed to generate a full ballot proof.
@@ -141,10 +132,6 @@ impl BallotMode {
     /// Unpack ballot mode from 4 Goldilocks elements (each holding a 62-bit chunk).
     pub fn unpack(packed: &[Goldilocks; 4]) -> Self {
         // Reconstruct the 248-bit integer from four 62-bit chunks.
-        let mut bits: u128 = 0;
-        let mut shift = 0u32;
-        // We only need the first 248 bits; use u128 for the first two chunks,
-        // then handle the upper bits carefully.
         let c0 = packed[0].as_canonical_u64() as u128;
         let c1 = packed[1].as_canonical_u64() as u128;
         let c2 = packed[2].as_canonical_u64() as u128;
@@ -163,11 +150,19 @@ impl BallotMode {
                 let chunk_idx = pos / chunk_bits;
                 let bit_in_chunk = pos % chunk_bits;
                 let chunk_val = match chunk_idx {
-                    0 => c0, 1 => c1, 2 => c2, 3 => c3, _ => 0
+                    0 => c0,
+                    1 => c1,
+                    2 => c2,
+                    3 => c3,
+                    _ => 0,
                 };
                 let available = chunk_bits - bit_in_chunk;
                 let take = remaining.min(available);
-                let mask = if take >= 128 { u128::MAX } else { (1u128 << take) - 1 };
+                let mask = if take >= 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << take) - 1
+                };
                 let bits_from_chunk = (chunk_val >> bit_in_chunk) & mask;
                 val |= bits_from_chunk << (width - remaining);
                 pos += take;
@@ -177,15 +172,15 @@ impl BallotMode {
         };
 
         BallotMode {
-            num_fields:      extract(0, 8),
-            group_size:      extract(8, 8),
-            unique_values:   extract(16, 1),
+            num_fields: extract(0, 8),
+            group_size: extract(8, 8),
+            unique_values: extract(16, 1),
             cost_from_weight: extract(17, 1),
-            cost_exponent:   extract(18, 8),
-            max_value:       extract(26, 48),
-            min_value:       extract(74, 48),
-            max_value_sum:   extract(122, 63),
-            min_value_sum:   extract(185, 63),
+            cost_exponent: extract(18, 8),
+            max_value: extract(26, 48),
+            min_value: extract(74, 48),
+            max_value_sum: extract(122, 63),
+            min_value_sum: extract(185, 63),
         }
     }
 
@@ -254,7 +249,7 @@ impl BallotMode {
 
 /// Generate the full 8-field ballot proof trace.
 ///
-/// This is the main trace generator. It builds a 4096 x 180 matrix covering:
+/// This is the main trace generator. It builds a padded trace covering:
 ///
 ///   1. K-derivation chain: Poseidon2(k) -> k1, Poseidon2(k1) -> k2, ... k8
 ///      Each derived key is a single Goldilocks element (64 bits).
@@ -270,7 +265,7 @@ impl BallotMode {
 ///
 ///   4. Inputs hash: Poseidon2 sponge of all inputs in circom-compatible order
 ///
-///   5. Padding rows to reach next power of 2
+///   5. Padding rows to reach the next power of 2
 ///
 /// Returns (trace_matrix, public_values, outputs).
 pub fn generate_full_ballot_trace(
@@ -322,25 +317,47 @@ pub fn generate_full_ballot_trace(
         let ki_scalar = goldilocks_to_scalar(k_derived[i]);
 
         // k_i * G -> C1_i (64-bit scalar)
-        let (rows, c1) = generate_scalar_mul_trace_nbits(&ki_scalar, &g, (3 * i) as u64, SMALL_SCALAR_BITS);
+        let ki_target = k_derived[i].as_canonical_u64();
+        let (rows, c1) = generate_scalar_mul_trace_nbits(
+            &ki_scalar,
+            &g,
+            (3 * i) as u64,
+            SMALL_SCALAR_BITS,
+            true,
+            ki_target,
+        );
         ec_row_counts.push(SMALL_SCALAR_BITS);
         ec_rows.push(rows);
         c1_points[i] = c1;
 
         // k_i * PK -> S_i (64-bit scalar)
-        let (rows, s) = generate_scalar_mul_trace_nbits(&ki_scalar, &inputs.pk, (3 * i + 1) as u64, SMALL_SCALAR_BITS);
+        let (rows, s) = generate_scalar_mul_trace_nbits(
+            &ki_scalar,
+            &inputs.pk,
+            (3 * i + 1) as u64,
+            SMALL_SCALAR_BITS,
+            true,
+            ki_target,
+        );
         ec_row_counts.push(SMALL_SCALAR_BITS);
         ec_rows.push(rows);
         s_points[i] = s;
 
         // field_i * G -> M_i (64-bit scalar)
-        let (rows, m) = generate_scalar_mul_trace_nbits(&inputs.fields[i], &g, (3 * i + 2) as u64, SMALL_SCALAR_BITS);
+        let (rows, m) = generate_scalar_mul_trace_nbits(
+            &inputs.fields[i],
+            &g,
+            (3 * i + 2) as u64,
+            SMALL_SCALAR_BITS,
+            true,
+            inputs.fields[i].0[0],
+        );
         ec_row_counts.push(SMALL_SCALAR_BITS);
         ec_rows.push(rows);
         m_points[i] = m;
     }
 
-    // C2 = M + S (computed outside STARK, verified via public values)
+    // C2 = M + S
     let mut c2_points = [Point::NEUTRAL; NUM_FIELDS];
     for i in 0..NUM_FIELDS {
         c2_points[i] = add_points(&m_points[i], &s_points[i]);
@@ -357,7 +374,8 @@ pub fn generate_full_ballot_trace(
     for i in 0..5 {
         vote_id_input.push(Goldilocks::from_u64(k_limbs[i]));
     }
-    let (vote_id_hash, vote_id_p2_traces) = poseidon2::poseidon2_hash_traced(&vote_id_input, 1, &constants);
+    let (vote_id_hash, vote_id_p2_traces) =
+        poseidon2::poseidon2_hash_traced(&vote_id_input, 1, &constants);
     // vote_id = hash[0] mod 2^63 + 2^63
     let vote_id_raw = vote_id_hash[0].as_canonical_u64();
     let vote_id_val = (vote_id_raw & ((1u64 << 63) - 1)) | (1u64 << 63);
@@ -377,13 +395,23 @@ pub fn generate_full_ballot_trace(
     // C1 and C2 encodings interleaved per field (5 each x 8 fields x 2 = 80)
     for i in 0..NUM_FIELDS {
         let enc = c1_points[i].encode();
-        for j in 0..5 { hash_input.push(Goldilocks::from_u64(enc.0[j].to_u64())); }
+        for j in 0..5 {
+            hash_input.push(Goldilocks::from_u64(enc.0[j].to_u64()));
+        }
         let enc = c2_points[i].encode();
-        for j in 0..5 { hash_input.push(Goldilocks::from_u64(enc.0[j].to_u64())); }
+        for j in 0..5 {
+            hash_input.push(Goldilocks::from_u64(enc.0[j].to_u64()));
+        }
     }
     hash_input.push(inputs.weight); // 1
-    let (inputs_hash_vec, inputs_hash_p2_traces) = poseidon2::poseidon2_hash_traced(&hash_input, 4, &constants);
-    let inputs_hash: [Goldilocks; 4] = [inputs_hash_vec[0], inputs_hash_vec[1], inputs_hash_vec[2], inputs_hash_vec[3]];
+    let (inputs_hash_vec, inputs_hash_p2_traces) =
+        poseidon2::poseidon2_hash_traced(&hash_input, 4, &constants);
+    let inputs_hash: [Goldilocks; 4] = [
+        inputs_hash_vec[0],
+        inputs_hash_vec[1],
+        inputs_hash_vec[2],
+        inputs_hash_vec[3],
+    ];
 
     // ============================================================
     // Step 5: Build trace matrix
@@ -393,7 +421,8 @@ pub fn generate_full_ballot_trace(
     let p2_perms = k_p2_traces.len() + vote_id_p2_traces.len() + inputs_hash_p2_traces.len();
     let p2_total_rows = p2_perms * (poseidon2::TOTAL_ROUNDS + 1);
     let bv_rows = NUM_FIELDS + 1; // 8 field rows + 1 bounds row
-    let data_rows = ec_total_rows + p2_total_rows + bv_rows;
+    let public_row_count = 1;
+    let data_rows = ec_total_rows + p2_total_rows + bv_rows + public_row_count;
     let total_rows = data_rows.next_power_of_two().max(64);
     let mut values = vec![Goldilocks::ZERO; total_rows * TRACE_WIDTH];
 
@@ -435,6 +464,14 @@ pub fn generate_full_ballot_trace(
     let mode = BallotMode::unpack(&inputs.packed_ballot_mode);
     let field_vals: Vec<u64> = inputs.fields.iter().map(|s| s.0[0]).collect();
 
+    for row in 0..total_rows {
+        let row_start = row * TRACE_WIDTH;
+        for i in 0..NUM_FIELDS {
+            values[row_start + GLOBAL_KS + i] = k_derived[i];
+            values[row_start + GLOBAL_FIELDS + i] = Goldilocks::from_u64(field_vals[i]);
+        }
+    }
+
     fill_ballot_validation_rows(
         &mut values,
         bv_start,
@@ -443,11 +480,12 @@ pub fn generate_full_ballot_trace(
         inputs.weight.as_canonical_u64(),
     );
     let bv_end = bv_start + bv_rows;
+    let public_row = bv_end;
 
     // Padding rows
     let neutral = Point::NEUTRAL;
     let mut pad_acc = c2_points[0];
-    for i in bv_end..total_rows {
+    for i in (public_row + 1)..total_rows {
         let row_start = i * TRACE_WIDTH;
         let row = &mut values[row_start..row_start + TRACE_WIDTH];
         let (doubled, _) = fill_scalar_mul_row(row, &pad_acc, &neutral, 0, 3);
@@ -476,6 +514,15 @@ pub fn generate_full_ballot_trace(
     // Vote ID
     pv[PV_VOTE_ID] = vote_id;
 
+    {
+        let row_start = (total_rows - 1) * TRACE_WIDTH;
+        let row = &mut values[row_start..row_start + TRACE_WIDTH];
+        row[PUB_OUTPUTS..PUB_OUTPUTS + PV_COUNT].copy_from_slice(&pv);
+        row[IS_EC] = Goldilocks::ZERO;
+        row[IS_P2] = Goldilocks::ZERO;
+        row[IS_BV] = Goldilocks::ZERO;
+    }
+
     let outputs = BallotOutputs {
         c1: c1_points,
         c2: c2_points,
@@ -495,76 +542,18 @@ fn goldilocks_to_scalar(g: Goldilocks) -> Scalar {
 
 /// Push an ecgfp5 point's coordinates as Goldilocks elements.
 fn push_point_encoded(out: &mut Vec<Goldilocks>, p: &Point) {
-    for limb in &p.X.0 { out.push(Goldilocks::from_u64(limb.to_u64())); }
-    for limb in &p.Z.0 { out.push(Goldilocks::from_u64(limb.to_u64())); }
-    for limb in &p.U.0 { out.push(Goldilocks::from_u64(limb.to_u64())); }
-    for limb in &p.T.0 { out.push(Goldilocks::from_u64(limb.to_u64())); }
-}
-
-/// Legacy single-field ballot trace generator (used by older tests).
-///
-/// Generates a trace with 3 full 319-bit scalar multiplications:
-///   Phase 0: k * G -> C1
-///   Phase 1: k * PK -> shared secret
-///   Phase 2: field * G -> message point
-/// No Poseidon2 hashing, no k-derivation. Public values are all zero.
-pub fn generate_ballot_trace(
-    k: &Scalar,
-    field_val: &Scalar,
-    pk: &Point,
-) -> (RowMajorMatrix<Goldilocks>, Vec<Goldilocks>) {
-    let g = Point::GENERATOR;
-
-    // Phase 0: C1 = k * G
-    let (rows0, c1_point) = generate_scalar_mul_trace(k, &g, 0);
-
-    // Phase 1: k * PK
-    let (rows1, k_pk_point) = generate_scalar_mul_trace(k, pk, 1);
-
-    // Phase 2: field * G
-    let (rows2, field_g_point) = generate_scalar_mul_trace(field_val, &g, 2);
-
-    // C2 = field*G + k*PK
-    let c2_point = add_points(&field_g_point, &k_pk_point);
-
-    let c1_enc = c1_point.encode();
-    let c2_enc = c2_point.encode();
-
-    // Build full trace
-    let total_rows = TRACE_HEIGHT;
-    let mut values = vec![Goldilocks::ZERO; total_rows * TRACE_WIDTH];
-
-    // Copy phase 0 rows
-    values[..SCALAR_BITS * TRACE_WIDTH].copy_from_slice(&rows0);
-
-    // Copy phase 1 rows
-    let offset1 = SCALAR_BITS * TRACE_WIDTH;
-    values[offset1..offset1 + SCALAR_BITS * TRACE_WIDTH].copy_from_slice(&rows1);
-
-    // Copy phase 2 rows
-    let offset2 = 2 * SCALAR_BITS * TRACE_WIDTH;
-    values[offset2..offset2 + SCALAR_BITS * TRACE_WIDTH].copy_from_slice(&rows2);
-
-    // Padding rows: fill with section=PAD (3) and valid EC data
-    let ec_end = 3 * SCALAR_BITS;
-    let mut pad_acc = c2_point;
-    let neutral = Point::NEUTRAL;
-    for i in ec_end..total_rows {
-        let row_start = i * TRACE_WIDTH;
-        let row = &mut values[row_start..row_start + TRACE_WIDTH];
-        let (doubled, _) = fill_scalar_mul_row(row, &pad_acc, &neutral, 0, 3);
-        row[IS_LAST_IN_PHASE] = Goldilocks::ONE;
-        row[IS_EC] = Goldilocks::ZERO;
-        row[IS_P2] = Goldilocks::ZERO;
-        pad_acc = doubled;
+    for limb in &p.X.0 {
+        out.push(Goldilocks::from_u64(limb.to_u64()));
     }
-
-    // Build public values (simplified -- legacy single-field doesn't have full inputs_hash)
-    let mut pv = vec![Goldilocks::ZERO; PV_COUNT];
-    // For legacy mode, inputs_hash = 0 (no Poseidon2 hashing in single-field mode)
-    // Address and vote_id also 0 (not computed in single-field mode)
-
-    (RowMajorMatrix::new(values, TRACE_WIDTH), pv)
+    for limb in &p.Z.0 {
+        out.push(Goldilocks::from_u64(limb.to_u64()));
+    }
+    for limb in &p.U.0 {
+        out.push(Goldilocks::from_u64(limb.to_u64()));
+    }
+    for limb in &p.T.0 {
+        out.push(Goldilocks::from_u64(limb.to_u64()));
+    }
 }
 
 /// Fill trace rows for a single Poseidon2 permutation (30 rounds = 30 rows).
@@ -604,14 +593,26 @@ pub fn fill_poseidon2_rows(
 
         // Fill round metadata
         row[P2_ROUND] = Goldilocks::from_u64(r as u64);
-        row[P2_ROUND_TYPE] = if is_partial { Goldilocks::ONE } else { Goldilocks::ZERO };
+        row[P2_ROUND_TYPE] = if is_partial {
+            Goldilocks::ONE
+        } else {
+            Goldilocks::ZERO
+        };
         row[P2_PERM_ID] = Goldilocks::from_u64(perm_id);
+        row[P2_ROUND_SEL + r] = Goldilocks::ONE;
+        if (perm_id as usize) < P2_K_SEL_COUNT {
+            row[P2_K_SEL + perm_id as usize] = Goldilocks::ONE;
+        }
 
         // Compute and fill S-box intermediates
         for i in 0..poseidon2::WIDTH {
             let x2 = if is_full {
                 // Full round: x2 = state[i] + external_rc[round_idx][i]
-                let rc_idx = if r < rf_half { r } else { rf_half + (r - rf_half - rp) };
+                let rc_idx = if r < rf_half {
+                    r
+                } else {
+                    rf_half + (r - rf_half - rp)
+                };
                 state[i] + constants.external_rc[rc_idx][i]
             } else if i == 0 {
                 // Partial round, element 0: x2 = state[0] + internal_rc[r - rf_half]
@@ -658,13 +659,17 @@ pub fn fill_poseidon2_rows(
     let out_row = &mut values[out_start..out_start + TRACE_WIDTH];
     let output_state = &trace.states[total_rounds]; // states[30]
 
-    // Store output state for potential boundary constraint verification
-    for i in 0..poseidon2::WIDTH {
-        out_row[P2_STATE + i] = output_state[i];
-    }
     // Fill valid EC padding data for the remaining columns
     let neutral = Point::NEUTRAL;
     let (_, _) = fill_scalar_mul_row(out_row, &neutral, &neutral, 0, 3);
+    // Store the permutation output after filling overlapping EC columns.
+    for i in 0..poseidon2::WIDTH {
+        out_row[P2_STATE + i] = output_state[i];
+    }
+    out_row[P2_PERM_ID] = Goldilocks::from_u64(perm_id);
+    if (perm_id as usize) < P2_K_SEL_COUNT {
+        out_row[P2_K_SEL + perm_id as usize] = Goldilocks::ONE;
+    }
     out_row[IS_LAST_IN_PHASE] = Goldilocks::ONE;
     out_row[IS_EC] = Goldilocks::ZERO;
     out_row[IS_P2] = Goldilocks::ZERO;
@@ -678,22 +683,34 @@ pub fn generate_poseidon2_trace(
     constants: &Poseidon2Constants,
 ) -> (RowMajorMatrix<Goldilocks>, Vec<Goldilocks>) {
     let rows_per_perm = poseidon2::TOTAL_ROUNDS + 1; // 31
-    let p2_rows = inputs.len() * rows_per_perm;
+    let public_row_count = 1;
+    let p2_rows = inputs.len() * rows_per_perm + public_row_count;
     let trace_height = p2_rows.next_power_of_two().max(16); // min 16 rows
 
     let mut values = vec![Goldilocks::ZERO; trace_height * TRACE_WIDTH];
+    let mut tracked_outputs = [Goldilocks::ZERO; P2_K_SEL_COUNT];
 
     let mut next_row = 0;
     for (perm_idx, input) in inputs.iter().enumerate() {
         let trace = poseidon2::poseidon2_permute_traced(input, constants);
+        if perm_idx < P2_K_SEL_COUNT {
+            tracked_outputs[perm_idx] = trace.states[poseidon2::TOTAL_ROUNDS][0];
+        }
         next_row = fill_poseidon2_rows(&mut values, &trace, constants, perm_idx as u64, next_row);
     }
 
+    for row in 0..trace_height {
+        let row_start = row * TRACE_WIDTH;
+        values[row_start + GLOBAL_KS..row_start + GLOBAL_KS + P2_K_SEL_COUNT]
+            .copy_from_slice(&tracked_outputs);
+    }
+
+    let public_row = next_row;
     // Padding rows: IS_EC=0, IS_P2=0 (already zero from initialization)
     // Fill valid EC data for padding to avoid any constraint issues
     let neutral = Point::NEUTRAL;
     let mut pad_acc = neutral;
-    for i in next_row..trace_height {
+    for i in (public_row + 1)..trace_height {
         let row_start = i * TRACE_WIDTH;
         let row = &mut values[row_start..row_start + TRACE_WIDTH];
         let (doubled, _) = fill_scalar_mul_row(row, &pad_acc, &neutral, 0, 3);
@@ -704,6 +721,9 @@ pub fn generate_poseidon2_trace(
     }
 
     let pv = vec![Goldilocks::ZERO; PV_COUNT];
+    values[(trace_height - 1) * TRACE_WIDTH + PUB_OUTPUTS
+        ..(trace_height - 1) * TRACE_WIDTH + PUB_OUTPUTS + PV_COUNT]
+        .copy_from_slice(&pv);
     (RowMajorMatrix::new(values, TRACE_WIDTH), pv)
 }
 
@@ -751,7 +771,7 @@ fn binary_exp_goldilocks(base: u64, exp: u64) -> (u64, [u64; 8], [u64; 8], [u64;
     // Squaring chain: sq[0] = base, sq[k] = sq[k-1]^2 mod p
     sq[0] = base % p;
     for k in 1..8 {
-        sq[k] = ((sq[k-1] as u128 * sq[k-1] as u128) % p as u128) as u64;
+        sq[k] = ((sq[k - 1] as u128 * sq[k - 1] as u128) % p as u128) as u64;
     }
 
     // Exponent bits (LSB first)
@@ -760,12 +780,10 @@ fn binary_exp_goldilocks(base: u64, exp: u64) -> (u64, [u64; 8], [u64; 8], [u64;
     }
 
     // Running product: acc[k] = product of (exp_bit[j] ? sq[j] : 1) for j=0..k
-    let selector = |k: usize| -> u64 {
-        if exp_bits[k] == 1 { sq[k] } else { 1 }
-    };
+    let selector = |k: usize| -> u64 { if exp_bits[k] == 1 { sq[k] } else { 1 } };
     acc[0] = selector(0);
     for k in 1..8 {
-        acc[k] = ((acc[k-1] as u128 * selector(k) as u128) % p as u128) as u64;
+        acc[k] = ((acc[k - 1] as u128 * selector(k) as u128) % p as u128) as u64;
     }
 
     (acc[7], sq, exp_bits, acc)
@@ -791,7 +809,11 @@ pub fn fill_ballot_validation_rows(
     let mut running = 0u64;
 
     for i in 0..NUM_FIELDS {
-        let mask = if (i as u64) < mode.num_fields { 1u64 } else { 0u64 };
+        let mask = if (i as u64) < mode.num_fields {
+            1u64
+        } else {
+            0u64
+        };
         let (power, _, _, _) = binary_exp_goldilocks(field_vals[i], mode.cost_exponent);
         powers[i] = power;
         running = (running + mask * power) % p;
@@ -805,7 +827,11 @@ pub fn fill_ballot_validation_rows(
         let row_start = row_idx * TRACE_WIDTH;
         let row = &mut values[row_start..row_start + TRACE_WIDTH];
 
-        let mask = if (i as u64) < mode.num_fields { 1u64 } else { 0u64 };
+        let mask = if (i as u64) < mode.num_fields {
+            1u64
+        } else {
+            0u64
+        };
         let fv = field_vals[i];
 
         // All 8 field values (for uniqueness cross-referencing)
@@ -816,6 +842,7 @@ pub fn fill_ballot_validation_rows(
         // Config values (constant across all BV rows)
         row[BV_NUM_FIELDS] = g(mode.num_fields);
         row[BV_ROW_INDEX] = g(i as u64);
+        row[BV_ROW_SEL + i] = Goldilocks::ONE;
         row[BV_MASK] = g(mask);
         row[BV_MIN_VALUE] = g(mode.min_value);
         row[BV_MAX_VALUE] = g(mode.max_value);
@@ -859,7 +886,11 @@ pub fn fill_ballot_validation_rows(
             if j == i {
                 row[BV_INV_DIFF + j] = Goldilocks::ZERO;
             } else {
-                let mask_j = if (j as u64) < mode.num_fields { 1u64 } else { 0u64 };
+                let mask_j = if (j as u64) < mode.num_fields {
+                    1u64
+                } else {
+                    0u64
+                };
                 if mask == 1 && mask_j == 1 && mode.unique_values == 1 && fv != field_vals[j] {
                     // Compute modular inverse of (fv - field_vals[j]) mod p
                     let diff = (fv as i128 - field_vals[j] as i128).rem_euclid(p as i128) as u64;
@@ -888,6 +919,7 @@ pub fn fill_ballot_validation_rows(
     }
     bounds_row[BV_NUM_FIELDS] = g(mode.num_fields);
     bounds_row[BV_ROW_INDEX] = g(NUM_FIELDS as u64); // index = 8 marks bounds row
+    bounds_row[BV_ROW_SEL + NUM_FIELDS] = Goldilocks::ONE;
     bounds_row[BV_MASK] = Goldilocks::ZERO; // not a field row
     bounds_row[BV_MIN_VALUE] = g(mode.min_value);
     bounds_row[BV_MAX_VALUE] = g(mode.max_value);
@@ -900,25 +932,41 @@ pub fn fill_ballot_validation_rows(
     bounds_row[BV_GROUP_SIZE] = g(mode.group_size);
 
     // Compute the limit based on cost_from_weight flag
-    let limit = if mode.cost_from_weight == 1 { weight } else { mode.max_value_sum };
+    let limit = if mode.cost_from_weight == 1 {
+        weight
+    } else {
+        mode.max_value_sum
+    };
     bounds_row[BV_LIMIT] = g(limit);
     bounds_row[BV_BOUNDS_COST] = g(total_cost);
 
     // Decompose (limit - total_cost) into 63 bits
     // Only meaningful when max_value_sum > 0 (i.e., there's an upper bound)
-    let upper_diff = if limit >= total_cost { limit - total_cost } else { 0 };
+    let upper_diff = if limit >= total_cost {
+        limit - total_cost
+    } else {
+        0
+    };
     for b in 0..BV_LIMIT_BITS_COUNT {
         bounds_row[BV_LIMIT_BITS + b] = g((upper_diff >> b) & 1);
     }
 
     // Decompose (total_cost - min_sum) into 63 bits
-    let lower_diff = if total_cost >= mode.min_value_sum { total_cost - mode.min_value_sum } else { 0 };
+    let lower_diff = if total_cost >= mode.min_value_sum {
+        total_cost - mode.min_value_sum
+    } else {
+        0
+    };
     for b in 0..BV_MINSUB_BITS_COUNT {
         bounds_row[BV_MINSUB_BITS + b] = g((lower_diff >> b) & 1);
     }
 
     // Group size check: decompose (num_fields - group_size) into 8 bits
-    let gs_diff = if mode.num_fields >= mode.group_size { mode.num_fields - mode.group_size } else { 0 };
+    let gs_diff = if mode.num_fields >= mode.group_size {
+        mode.num_fields - mode.group_size
+    } else {
+        0
+    };
     for b in 0..BV_GS_BITS_COUNT {
         bounds_row[BV_GS_BITS + b] = g((gs_diff >> b) & 1);
     }
@@ -931,7 +979,6 @@ pub fn fill_ballot_validation_rows(
     }
 
     bounds_row[BV_IS_BOUNDS] = Goldilocks::ONE; // marks this as the bounds row
-    bounds_row[BV_COST_SUM] = g(total_cost);
     bounds_row[IS_EC] = Goldilocks::ZERO;
     bounds_row[IS_P2] = Goldilocks::ZERO;
     bounds_row[IS_BV] = Goldilocks::ONE;
@@ -939,7 +986,9 @@ pub fn fill_ballot_validation_rows(
 
 /// Compute modular inverse of a mod p using extended Euclidean algorithm.
 fn mod_inverse(a: u64, p: u64) -> u64 {
-    if a == 0 { return 0; }
+    if a == 0 {
+        return 0;
+    }
     let mut old_r = a as i128;
     let mut r = p as i128;
     let mut old_s: i128 = 1;

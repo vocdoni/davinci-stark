@@ -1,21 +1,21 @@
 //! Fibonacci AIR smoke test — verifies Plonky3 prove/verify works correctly.
-//! This is a direct adaptation of p3-miden-prover's fibonacci_air test.
+//! This mirrors a small upstream Plonky3 prove/verify example.
 
 use core::borrow::Borrow;
 
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
-use p3_field::{ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
+use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
+use p3_fri::{TwoAdicFriPcs, create_test_fri_params};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
-use p3_miden_air::{MidenAir, MidenAirBuilder};
-use p3_miden_fri::{TwoAdicFriPcs, create_test_fri_params};
-use p3_miden_prover::{StarkConfig, prove, verify};
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_uni_stark::{StarkConfig, prove, verify};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
@@ -23,17 +23,20 @@ use rand::rngs::SmallRng;
 
 pub struct FibonacciAir;
 
-impl<F: Field, EF: ExtensionField<F>> MidenAir<F, EF> for FibonacciAir {
+impl<F: PrimeCharacteristicRing> BaseAir<F> for FibonacciAir {
     fn width(&self) -> usize {
         2
     }
+}
 
-    fn eval<AB: MidenAirBuilder<F = F>>(&self, builder: &mut AB) {
+impl<AB> Air<AB> for FibonacciAir
+where
+    AB: AirBuilder + AirBuilderWithPublicValues,
+{
+    fn eval(&self, builder: &mut AB) {
         let main = builder.main();
-        let (local, next) = (
-            main.row_slice(0).expect("Matrix is empty?"),
-            main.row_slice(1).expect("Matrix only has 1 row?"),
-        );
+        let local = main.row_slice(0).expect("Matrix is empty?");
+        let next = main.row_slice(1).expect("Matrix only has 1 row?");
         let local: &FibRow<AB::Var> = (*local).borrow();
         let next: &FibRow<AB::Var> = (*next).borrow();
 
@@ -120,11 +123,9 @@ fn prove_and_verify_fibonacci(a: u64, b: u64, n: usize, expected: u64, log_final
         Goldilocks::from_u64(b),
         Goldilocks::from_u64(expected),
     ];
-    let var_len_pis: Vec<&[&[Val]]> = vec![];
-
     let air = FibonacciAir;
-    let proof = prove(&config, &air, &trace, &pis);
-    verify(&config, &air, &proof, &pis, &var_len_pis).expect("verification failed");
+    let proof = prove(&config, &air, trace, &pis);
+    verify(&config, &air, &proof, &pis).expect("verification failed");
 }
 
 #[test]

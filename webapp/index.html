@@ -32,9 +32,17 @@
     .error { color: #f85149; }
     .info { color: #58a6ff; }
     .timing { color: #d2a8ff; }
+    .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; }
+    .metric { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 0.85rem; }
+    .metric-label { color: #8b949e; font-size: 0.75rem; margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .metric-value { color: #c9d1d9; font-family: monospace; font-size: 1rem; }
+    .metric-note { color: #8b949e; font-size: 0.8rem; margin-top: 0.75rem; }
     .k-row { display: flex; gap: 0.5rem; align-items: flex-end; margin-bottom: 0.5rem; }
     .k-row input { flex: 1; margin-bottom: 0; }
     .k-row button { margin: 0; flex-shrink: 0; }
+    @media (max-width: 768px) {
+      .fields-grid, .config-grid, .metrics-grid, .row-2col { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -124,6 +132,32 @@
   <div class="card">
     <button id="btn-prove" onclick="doProve()">Compute Inputs & Generate Proof</button>
     <button id="btn-verify" class="secondary" onclick="doVerify()" disabled>Verify Proof</button>
+  </div>
+
+  <!-- Performance Summary -->
+  <div class="card">
+    <div class="card-title">⏱️ Performance</div>
+    <div class="metrics-grid">
+      <div class="metric">
+        <div class="metric-label">Profile</div>
+        <div id="metric-profile" class="metric-value">Browser Only</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Last Keygen</div>
+        <div id="metric-keygen" class="metric-value">-</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Last Prove</div>
+        <div id="metric-prove" class="metric-value">-</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Last Verify</div>
+        <div id="metric-verify" class="metric-value">-</div>
+      </div>
+    </div>
+    <div id="metric-note" class="metric-note">
+      FRI config: blowup 8, 34 queries, 0 PoW bits. Single browser profile targeting about 102 bits of conjectured FRI soundness.
+    </div>
   </div>
 
   <!-- Log Output -->
