@@ -21,12 +21,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout ecgfp5
-        uses: actions/checkout@v4
-        with:
-          repository: pornin/ecgfp5
-          path: ecgfp5-src
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -44,10 +38,6 @@ jobs:
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
-
-      - name: Link ecgfp5 into Cargo path
-        run: |
-          ln -s "$GITHUB_WORKSPACE/ecgfp5-src" "$GITHUB_WORKSPACE/../ecgfp5"
 
       - name: Build WASM package
         run: wasm-pack build --target web --release

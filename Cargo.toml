@@ -30,7 +30,7 @@ p3-maybe-rayon = { version = "0.4.2", default-features = false }
 p3-util = { version = "0.4.2", default-features = false }
 
 # ecgfp5 curve (for trace generation / ElGamal)
-ecgfp5 = { path = "../ecgfp5/rust" }
+ecgfp5 = { path = "vendor/ecgfp5/rust" }
 
 # Serialization
 serde = { version = "1", features = ["derive", "alloc"], default-features = false }
