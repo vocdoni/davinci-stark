@@ -4,6 +4,8 @@
 // proof generation does not freeze the browser. All WASM calls go through
 // the call() helper which returns a promise resolved when the worker replies.
 
+import { normalizeChoices, packBallotMode } from './ballot_config.js';
+
 const logEl = document.getElementById('log');
 const metricKeygenEl = document.getElementById('metric-keygen');
 const metricProveEl = document.getElementById('metric-prove');
@@ -89,41 +91,6 @@ function parseInputValue(str) {
   return BigInt(str);
 }
 
-/** Pack ballot configuration into 4 x u64 LE (248 bits packed into 4 Goldilocks elements).
- *  Bit layout (matching circom's UnpackBallotMode):
- *   [0:8]   num_fields
- *   [8:16]  group_size
- *   [16]    unique_values
- *   [17]    cost_from_weight
- *   [18:26] cost_exponent
- *   [26:74] max_value (48 bits)
- *   [74:122] min_value (48 bits)
- *   [122:185] max_value_sum (63 bits)
- *   [185:248] min_value_sum (63 bits)
- */
-function packBallotMode(config) {
-  let bits = 0n;
-  bits |= BigInt(config.numFields) & 0xFFn;
-  bits |= (BigInt(config.groupSize) & 0xFFn) << 8n;
-  bits |= (BigInt(config.uniqueValues) & 1n) << 16n;
-  bits |= (BigInt(config.costFromWeight) & 1n) << 17n;
-  bits |= (BigInt(config.costExponent) & 0xFFn) << 18n;
-  bits |= (BigInt(config.maxValue) & 0xFFFFFFFFFFFFn) << 26n;
-  bits |= (BigInt(config.minValue) & 0xFFFFFFFFFFFFn) << 74n;
-  bits |= (BigInt(config.maxValueSum) & 0x7FFFFFFFFFFFFFFFn) << 122n;
-  bits |= (BigInt(config.minValueSum) & 0x7FFFFFFFFFFFFFFFn) << 185n;
-
-  // Split into 4 x 62-bit chunks (fit in Goldilocks field < 2^64 - 2^32 + 1)
-  const mask62 = (1n << 62n) - 1n;
-  const out = new Uint8Array(32);
-  for (let i = 0; i < 4; i++) {
-    const chunk = (bits >> (BigInt(i) * 62n)) & mask62;
-    const bytes = u64ToLeBytes(chunk);
-    out.set(bytes, i * 8);
-  }
-  return out;
-}
-
 // Auto-generate random K (32 random bytes as hex)
 window.genRandomK = function() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -137,8 +104,7 @@ window.doProve = async function() {
   try {
     // Parse vote choices
     const choicesStr = document.getElementById('vote_choices').value;
-    const choices = choicesStr.split(',').map(s => parseInt(s.trim()) || 0);
-    while (choices.length < 8) choices.push(0);
+    const { choices, numFields } = normalizeChoices(choicesStr);
 
     const weight = parseInt(document.getElementById('weight').value) || 1;
     const processIdStr = document.getElementById('process_id').value;
@@ -154,7 +120,7 @@ window.doProve = async function() {
 
     // Read ballot config
     const config = {
-      numFields: Math.min(choices.length, 8),
+      numFields,
       groupSize: parseInt(document.getElementById('group_size').value) || 1,
       uniqueValues: parseInt(document.getElementById('unique_values').value) || 0,
       costFromWeight: parseInt(document.getElementById('cost_from_weight').value) || 0,

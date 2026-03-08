@@ -19,7 +19,7 @@ proof in milliseconds without ever seeing the vote choices.
 
 1. **Execution trace**: The computation is laid out as a 2D matrix. Each row represents a
    step of the computation, each column represents a register. For our ballot proof, this is
-   a 4,096 × 271 matrix over the Goldilocks field.
+   a 4,096 × 1,581 matrix over the Goldilocks field.
 
 2. **AIR constraints**: An Algebraic Intermediate Representation (AIR) defines polynomial
    equations that every pair of consecutive rows must satisfy. For example, "the next row's
@@ -68,20 +68,24 @@ proof in milliseconds without ever seeing the vote choices.
 
 ## What this project does
 
-The DAVINCI protocol requires each voter to prove, in zero knowledge, that:
+The current STARK proves the following:
 
-1. **Correct encryption**: The submitted ciphertext is a valid ElGamal encryption of the
-   vote under the election public key.
-2. **Range validity**: Each vote field value is within the allowed range `[min_value, max_value]`.
-3. **Uniqueness** (optional): All active vote fields have distinct values.
-4. **Cost bounds**: The total "cost" of the ballot (sum of `field^exponent`) is within
-   `[min_value_sum, max_value_sum]` (or `[min_value_sum, weight]` when `cost_from_weight = 1`).
-5. **Deterministic vote ID**: A unique identifier derived from the voter's address, the
-   election process ID, and the encryption randomness.
-6. **Inputs hash**: A commitment to all ballot data so the verifier can link the proof to
-   specific election parameters.
+1. **Ballot validity**: Each active vote field is within `[min_value, max_value]`, optional
+   uniqueness is enforced, and the ballot cost bounds follow the ballot mode.
+2. **Shared-witness consistency**: The same hidden ballot fields and derived `k_i` values are
+   reused across the ballot-validation, Poseidon2, and EC sections.
+3. **BallotCipher consistency**: For each field, the EC section proves
+   `C1_i = k_i * G`, `S_i = k_i * PK`, `M_i = field_i * G`, and `C2_i = M_i + S_i`.
+   The `k_i * PK` phases are bound to the shared election public key `PK`, and the
+   encoded `C1_i` / `C2_i` values reused by the hash section are bound to those EC outputs.
+4. **Deterministic vote ID**: `vote_id` is derived from a constrained Poseidon2 sponge over
+   `{process_id, address, k_limbs}` and then truncated as `trunc63(hash) + 2^63`.
+5. **Inputs-hash consistency**: The constrained `inputs_hash` sponge absorbs the full shared
+   statement `{process_id, packed_ballot_mode, PK, address, vote_id, C1[0..7], C2[0..7], weight}`,
+   and its output is bound to the public row.
+6. **Public outputs**: The final row binds `{inputs_hash, address, vote_id}` to the trace.
 
-This project implements all of these checks as AIR constraints in a Plonky3 STARK.
+These properties are enforced as AIR constraints in a Plonky3 STARK.
 
 ---
 
@@ -164,14 +168,14 @@ The process:
 3. **Public values**: 9 Goldilocks elements (`inputs_hash`, `address`, `vote_id`) are exposed
    to the verifier. These are bound on a dedicated final output row in the trace.
 
-4. **Hidden cross-section bindings**: Additional private columns replicate the derived
-   `k_i` values and ballot field values across the trace. The AIR binds Poseidon outputs,
-   EC scalar bits, and ballot-validation rows to those shared hidden values so the proof
-   describes one ballot statement rather than three locally valid subtraces.
+4. **Hidden cross-section bindings**: Additional private columns replicate the shared ballot
+   statement across the trace: derived `k_i` values, ballot field values, ballot-mode data,
+   process ID, original `k` limbs, and the election public key. The AIR binds Poseidon
+   outputs, EC scalar bits, and ballot-validation rows to those shared hidden values.
 
 ### Trace layout
 
-The execution trace is a **4,096 × 271 matrix** over Goldilocks. Rows are divided into
+The execution trace is a **4,096 × 1,581 matrix** over Goldilocks. Rows are divided into
 three sections using binary flag columns (`IS_EC`, `IS_P2`, `IS_BV`):
 
 ```
@@ -206,7 +210,9 @@ section gating. The extra width comes from selector bits and hidden linkage colu
 - EC phase/scalar binding columns
 - hidden global `k_i` values
 - hidden global field values
-- Poseidon `k`-permutation selectors
+- hidden ballot-mode, process-ID, `k`-limb, and public-key values
+- Poseidon preimage chunk selectors and vote-id bit decomposition
+- packed-ballot-mode bit decomposition and exact in-circuit unpacking
 
 ### EC Section: ElGamal encryption (24 scalar multiplications)
 
@@ -216,9 +222,9 @@ For each of the 8 vote fields, the circuit performs 3 scalar multiplications:
 2. **S_i = k_i × PK** -- encryption randomness times the election public key
 3. **M_i = field_i × G** -- vote value times the generator
 
-Then **C2_i = M_i + S_i**. The ciphertext limbs are included in `inputs_hash`, and the
-underlying `k_i` / `field_i` scalars are now tied to the EC rows through hidden linkage
-columns and scalar-accumulation constraints.
+The underlying `k_i` / `field_i` scalars are tied to the EC rows through hidden linkage
+columns and scalar-accumulation constraints, and the `k_i * PK` phases are tied to the
+shared public key carried in the statement columns.
 
 Each scalar mul uses the **double-and-add** algorithm, processing one bit per row.
 The derived keys `k_i` are 64-bit Goldilocks elements (derived from the master key `k`
@@ -332,14 +338,13 @@ These match the Circom circuit's public signals:
 
 | Index | Name | Description |
 |---|---|---|
-| 0-3 | `inputs_hash[4]` | Poseidon2 sponge hash committing to all private ballot data |
+| 0-3 | `inputs_hash[4]` | Poseidon2 sponge hash output bound to the public row |
 | 4-7 | `address[4]` | Voter address (256-bit as 4 Goldilocks elements) |
 | 8 | `vote_id` | Deterministic vote identifier |
 
-The `inputs_hash` covers: process_id, packed_ballot_mode, pk (20 limbs), address,
-vote_id, all 80 ciphertext limbs (C1 and C2 for 8 fields), and weight. This lets the
-verifier check that the proof matches specific election parameters and ciphertexts
-without seeing any private data.
+The public `inputs_hash` is bound to the constrained Poseidon2 section. The AIR binds the
+entire absorbed preimage `{process_id, packed_ballot_mode, PK, address, vote_id, C1[0..7],
+C2[0..7], weight}` to the shared statement values carried across the trace.
 
 The verifier does not see the hidden linkage columns. They exist only to ensure that:
 - Poseidon-derived `k_i` values are the same scalars used in EC phases `k_i * G` and `k_i * PK`
@@ -392,7 +397,7 @@ We use **HidingFriPcs** from Plonky3 to achieve real zero-knowledge:
 3. **Verifier independence**: The verifier never generates blinding codewords, so it can
    reconstruct the STARK configuration with a fixed seed.
 
-Without HidingFriPcs, the 34 FRI query positions would each reveal 271 Goldilocks field
+Without HidingFriPcs, the 34 FRI query positions would each reveal 1,581 Goldilocks field
 elements of the actual execution trace. With it, the verifier sees only random-looking
 values that satisfy the constraint checks but reveal nothing about the private inputs.
 
@@ -536,10 +541,15 @@ already correct on 64-bit targets).
    outputs are stored as trace columns to keep AIR constraint degree at 4. Constants are
    the published Horizen Labs values used by Zisk, not randomly generated.
 
-4. **Statement binding**: Security of the ballot statement now relies on the hidden-link
+4. **Statement binding**: Security of the ballot statement relies on the hidden-link
    columns and their AIR constraints. These bind:
    - Poseidon `k`-chain outputs to EC `k_i` scalar-mul phases
    - BV field values to EC `field_i * G` phases
+   - the packed ballot mode to its exact decoded BV rule set via 248 in-circuit bits
+   - vote-id preimage rows to the vote-id Poseidon section
+   - the inputs-hash absorb rows to the full shared statement
+   - the `k_i * PK` EC phases to the shared public key
+   - the encoded `C1_i` / `C2_i` ciphertexts to the EC phase outputs
    - public values to the final output row
 
 5. **Blinding RNG**: Seeded from system entropy (`getrandom` -> `crypto.getRandomValues()`
@@ -564,8 +574,8 @@ cross-system hash compatibility with the Zisk Poseidon2 precompile.
 | Full rounds | 8 (4 + 4) | 8 (4 + 4) |
 | Partial rounds | 22 | 22 |
 | S-box degree | 7 (x^7) | 7 (x^7) |
-| Diagonal matrix (D_8) | Hardcoded (same values) | Hardcoded |
-| Round constants (RC_8) | 86 hardcoded hex values | 86 hardcoded hex values |
+| Diagonal matrix (D_8) | Upstream Plonky3 Goldilocks constants | Hardcoded |
+| Round constants (RC_8) | Upstream Plonky3 HL constants | 86 hardcoded hex values |
 | 4×4 MDS matrix | Horizen Labs `[[5,7,1,3],[4,6,1,1],[1,3,5,7],[1,1,4,6]]` | Same |
 | Initial `matmul_external` | Applied before first round | Applied before first round |
 
@@ -587,12 +597,12 @@ This project uses Poseidon2 in two separate contexts:
 
 | Metric | Value | Notes |
 |---|---|---|
-| Trace size | 4,096 × 271 | Includes selector bits and hidden linkage columns |
+| Trace size | 4,096 × 1,581 | Includes selector bits, shared statement columns, and packed-mode bits |
 | Max constraint degree | 4 | Stored x7 columns + BV intermediates |
 | FRI blowup factor | 8 (`log_blowup = 3`) | Required by the completed AIR |
 | FRI queries | 34 | ~102-bit conjectured soundness, no PoW |
-| Native prove time | ~14.4s | Release mode, single-threaded, full ballot proof |
-| Native verify time | ~12ms | Release mode |
+| Native prove time | ~41.3s | Release mode, full 8-field ballot proof |
+| Native verify time | ~50ms | Release mode, full 8-field ballot proof |
 | WASM binary | ~952 KB | `wasm-pack build --target web --release`, no wasm-opt |
 | Proof size | ~430-500 KB | Depends on query openings and transcript layout |
 
@@ -608,7 +618,7 @@ the trace polynomial is extended with blinding codewords.
 | Hash | Poseidon (BN254 scalar field) | Poseidon2 (Goldilocks, Zisk-compatible) |
 | Trusted setup | Required (powers of tau ceremony) | **None** (transparent) |
 | Proof size | ~200 bytes | ~430 KB |
-| Prover time (browser) | ~10-30s | Targeted browser-friendly high-security profile |
+| Prover time (browser) | Browser-dependent | Use the webapp timing panel on the target device |
 | Verifier time | ~5ms | ~1ms |
 | Ballot validation | Full (range, uniqueness, cost) | Full (range, uniqueness, cost, bounds) |
 | Post-quantum | No (relies on pairing assumptions) | Plausibly yes (hash-based) |
@@ -622,22 +632,22 @@ davinci-stark/
 ├── src/
 │   ├── air.rs            AIR constraint definitions (~1,100 lines)
 │   │                     EC, Poseidon2, and BV constraint sections
-│   ├── columns.rs        Trace column layout (271 columns, named constants)
+│   ├── columns.rs        Trace column layout (1,581 columns, named constants)
 │   ├── config.rs         STARK configuration (HidingFriPcs, FRI params, RNG)
 │   ├── ecgfp5_ops.rs     ecgfp5 point doubling/addition for trace generation
 │   ├── elgamal.rs        ElGamal keygen/encrypt helpers
 │   ├── gfp5.rs           GF(p^5) arithmetic constraint helpers
 │   ├── lib.rs            Public API: prove_full_ballot, verify_ballot
-│   ├── poseidon2.rs      Poseidon2 permutation and sponge with trace recording
-│   │                     Zisk-compatible constants (RC_8, D_8, HL MDS)
+│   ├── poseidon2.rs      Poseidon2 permutation tracer and sponge wrapper
+│   │                     Upstream Plonky3 HL constants, Zisk-compatible behavior
 │   ├── trace.rs          Trace generation (~940 lines, BallotInputs → matrix)
 │   └── wasm.rs           WASM bindings via wasm-bindgen
 ├── tests/
-│   ├── ballot_e2e.rs     5 end-to-end ballot proof tests
-│   ├── ec_test.rs        2 EC scalar multiplication tests
+│   ├── ballot_e2e.rs     End-to-end ballot proofs + adversarial binding regressions
+│   ├── ec_test.rs        EC scalar multiplication correctness
 │   ├── fibonacci_smoke.rs  2 Plonky3 integration smoke tests
 │   ├── gfp5_test.rs      3 GF(p^5) multiplication tests
-│   └── poseidon2_test.rs 7 Poseidon2 STARK proof tests
+│   └── poseidon2_test.rs Poseidon2 compatibility + adversarial gadget tests
 ├── webapp/
 │   ├── index.html        Web UI (dark theme, ballot form)
 │   ├── src/
@@ -704,7 +714,7 @@ cd webapp && npm install && cd ..
 ### Quick start
 
 ```bash
-make build    # Build WASM package (~866 KB)
+make build    # Build WASM package (~952 KB)
 make test     # Run the Rust test suite in release mode
 make serve    # Build WASM + start the Vite dev server
 make clean    # Remove all build artifacts

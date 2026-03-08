@@ -441,19 +441,56 @@ pub fn generate_full_ballot_trace(
 
     // K-derivation chain (8 permutations)
     for trace in &k_p2_traces {
-        p2_row = fill_poseidon2_rows(&mut values, trace, &constants, perm_id, p2_row);
+        p2_row = fill_poseidon2_rows(&mut values, trace, &constants, perm_id, p2_row, None, None);
         perm_id += 1;
     }
 
-    // Vote ID hash (variable number of permutations)
-    for trace in &vote_id_p2_traces {
-        p2_row = fill_poseidon2_rows(&mut values, trace, &constants, perm_id, p2_row);
+    // Vote ID hash (4 permutations)
+    for (idx, trace) in vote_id_p2_traces.iter().enumerate() {
+        let mut chunk = [Goldilocks::ZERO; 4];
+        for j in 0..4 {
+            if let Some(v) = vote_id_input.get(idx * 4 + j) {
+                chunk[j] = *v;
+            }
+        }
+        annotate_poseidon_preperm_row(&mut values, p2_row - 1, &chunk, Some(idx), None);
+        p2_row = fill_poseidon2_rows(
+            &mut values,
+            trace,
+            &constants,
+            perm_id,
+            p2_row,
+            Some(idx),
+            None,
+        );
         perm_id += 1;
     }
+    values[(p2_row - 1) * TRACE_WIDTH + P2_VOTE_ID_OUT] = Goldilocks::ONE;
+    for b in 0..64 {
+        values[(p2_row - 1) * TRACE_WIDTH + P2_VOTE_ID_BITS + b] =
+            Goldilocks::from_bool(((vote_id_raw >> b) & 1) != 0);
+    }
 
-    // Input hash (variable number of permutations)
-    for trace in &inputs_hash_p2_traces {
-        p2_row = fill_poseidon2_rows(&mut values, trace, &constants, perm_id, p2_row);
+    // Input hash (all absorb permutations bound to the shared statement)
+    for (idx, trace) in inputs_hash_p2_traces.iter().enumerate() {
+        if idx < P2_INPUTS_PREFIX_SEL_COUNT {
+            let mut chunk = [Goldilocks::ZERO; 4];
+            for j in 0..4 {
+                if let Some(v) = hash_input.get(idx * 4 + j) {
+                    chunk[j] = *v;
+                }
+            }
+            annotate_poseidon_preperm_row(&mut values, p2_row - 1, &chunk, None, Some(idx));
+        }
+        p2_row = fill_poseidon2_rows(
+            &mut values,
+            trace,
+            &constants,
+            perm_id,
+            p2_row,
+            None,
+            Some(idx),
+        );
         perm_id += 1;
     }
 
@@ -470,6 +507,44 @@ pub fn generate_full_ballot_trace(
             values[row_start + GLOBAL_KS + i] = k_derived[i];
             values[row_start + GLOBAL_FIELDS + i] = Goldilocks::from_u64(field_vals[i]);
         }
+        values[row_start + GLOBAL_BV_NUM_FIELDS] = Goldilocks::from_u64(mode.num_fields);
+        values[row_start + GLOBAL_BV_MIN_VALUE] = Goldilocks::from_u64(mode.min_value);
+        values[row_start + GLOBAL_BV_MAX_VALUE] = Goldilocks::from_u64(mode.max_value);
+        values[row_start + GLOBAL_BV_UNIQUE] = Goldilocks::from_u64(mode.unique_values);
+        values[row_start + GLOBAL_BV_COST_FROM_WEIGHT] =
+            Goldilocks::from_u64(mode.cost_from_weight);
+        values[row_start + GLOBAL_BV_COST_EXP] = Goldilocks::from_u64(mode.cost_exponent);
+        values[row_start + GLOBAL_BV_MAX_SUM] = Goldilocks::from_u64(mode.max_value_sum);
+        values[row_start + GLOBAL_BV_MIN_SUM] = Goldilocks::from_u64(mode.min_value_sum);
+        values[row_start + GLOBAL_BV_GROUP_SIZE] = Goldilocks::from_u64(mode.group_size);
+        values[row_start + GLOBAL_BV_WEIGHT] = inputs.weight;
+        values[row_start + GLOBAL_PACKED_MODE..row_start + GLOBAL_PACKED_MODE + 4]
+            .copy_from_slice(&inputs.packed_ballot_mode);
+        values[row_start + GLOBAL_PROCESS_ID..row_start + GLOBAL_PROCESS_ID + 4]
+            .copy_from_slice(&inputs.process_id);
+        for i in 0..5 {
+            values[row_start + GLOBAL_K_LIMBS + i] = Goldilocks::from_u64(k_limbs[i]);
+        }
+        let row_slice = &mut values[row_start..row_start + TRACE_WIDTH];
+        write_point_coords(row_slice, GLOBAL_PK, &inputs.pk);
+        for i in 0..NUM_FIELDS {
+            write_point_coords(row_slice, GLOBAL_S_POINTS + i * 20, &s_points[i]);
+            write_point_coords(row_slice, GLOBAL_C2_POINTS + i * 20, &c2_points[i]);
+            write_point_encoding(row_slice, GLOBAL_C1_ENC + i * 5, &c1_points[i]);
+            write_point_encoding(row_slice, GLOBAL_C2_ENC + i * 5, &c2_points[i]);
+            fill_c2_add_intermediates(row_slice, GLOBAL_C2_ADD_INTER + i * 50, &m_points[i], &s_points[i]);
+        }
+        for i in 0..GLOBAL_HASH_INPUT_COUNT {
+            values[row_start + GLOBAL_HASH_INPUT + i] = hash_input.get(i).copied().unwrap_or(Goldilocks::ZERO);
+        }
+        for chunk in 0..4 {
+            let chunk_val = inputs.packed_ballot_mode[chunk].as_canonical_u64();
+            for bit in 0..62 {
+                let bit_idx = chunk * 62 + bit;
+                values[row_start + GLOBAL_PACKED_MODE_BITS + bit_idx] =
+                    Goldilocks::from_bool(((chunk_val >> bit) & 1) != 0);
+            }
+        }
     }
 
     fill_ballot_validation_rows(
@@ -479,6 +554,7 @@ pub fn generate_full_ballot_trace(
         &mode,
         inputs.weight.as_canonical_u64(),
     );
+    values[(bv_start - 1) * TRACE_WIDTH + P2_INPUTS_HASH_OUT] = Goldilocks::ONE;
     let bv_end = bv_start + bv_rows;
     let public_row = bv_end;
 
@@ -556,6 +632,74 @@ fn push_point_encoded(out: &mut Vec<Goldilocks>, p: &Point) {
     }
 }
 
+fn write_point_coords(row: &mut [Goldilocks], offset: usize, p: &Point) {
+    let mut idx = offset;
+    for limb in &p.X.0 {
+        row[idx] = Goldilocks::from_u64(limb.to_u64());
+        idx += 1;
+    }
+    for limb in &p.Z.0 {
+        row[idx] = Goldilocks::from_u64(limb.to_u64());
+        idx += 1;
+    }
+    for limb in &p.U.0 {
+        row[idx] = Goldilocks::from_u64(limb.to_u64());
+        idx += 1;
+    }
+    for limb in &p.T.0 {
+        row[idx] = Goldilocks::from_u64(limb.to_u64());
+        idx += 1;
+    }
+}
+
+fn write_point_encoding(row: &mut [Goldilocks], offset: usize, p: &Point) {
+    let enc = p.encode();
+    for (i, limb) in enc.0.iter().enumerate() {
+        row[offset + i] = Goldilocks::from_u64(limb.to_u64());
+    }
+}
+
+fn fill_c2_add_intermediates(row: &mut [Goldilocks], offset: usize, m: &Point, s: &Point) {
+    let at1 = m.X * s.X;
+    let at2 = m.Z * s.Z;
+    let at3 = m.U * s.U;
+    let at4 = m.T * s.T;
+    let at5_raw = (m.X + m.Z) * (s.X + s.Z);
+    let at6_raw = (m.U + m.T) * (s.U + s.T);
+    let t5 = at5_raw - at1 - at2;
+    let t6 = at6_raw - at3 - at4;
+    let t7 = at1 + at2.mul_small_k1(Point::B1);
+    let at8 = at4 * t7;
+    let at9 = at3 * (t5.mul_small_k1(2 * Point::B1) + t7.double());
+    let at10 = (at4 + at3.double()) * (t5 + t7);
+    let u_pre = t6 * (at2.mul_small_k1(Point::B1) - at1);
+
+    let inters = [at1, at2, at3, at4, at5_raw, at6_raw, at8, at9, at10, u_pre];
+    for (idx, val) in inters.iter().enumerate() {
+        for (j, limb) in val.0.iter().enumerate() {
+            row[offset + idx * 5 + j] = Goldilocks::from_u64(limb.to_u64());
+        }
+    }
+}
+
+fn annotate_poseidon_preperm_row(
+    values: &mut [Goldilocks],
+    row_idx: usize,
+    chunk: &[Goldilocks; 4],
+    vote_id_sel: Option<usize>,
+    inputs_prefix_sel: Option<usize>,
+) {
+    let row_start = row_idx * TRACE_WIDTH;
+    let row = &mut values[row_start..row_start + TRACE_WIDTH];
+    row[P2_ABSORB_CHUNK..P2_ABSORB_CHUNK + 4].copy_from_slice(chunk);
+    if let Some(idx) = vote_id_sel {
+        row[P2_VOTE_ID_PRE_SEL + idx] = Goldilocks::ONE;
+    }
+    if let Some(idx) = inputs_prefix_sel {
+        row[P2_INPUTS_PREFIX_SEL + idx] = Goldilocks::ONE;
+    }
+}
+
 /// Fill trace rows for a single Poseidon2 permutation (30 rounds = 30 rows).
 ///
 /// The row at `start_row` corresponds to round 0, and the row at `start_row + 29`
@@ -570,6 +714,8 @@ pub fn fill_poseidon2_rows(
     constants: &Poseidon2Constants,
     perm_id: u64,
     start_row: usize,
+    vote_id_sel: Option<usize>,
+    inputs_prefix_sel: Option<usize>,
 ) -> usize {
     let total_rounds = poseidon2::TOTAL_ROUNDS; // 30
     let rf_half = poseidon2::ROUNDS_F_HALF; // 4
@@ -602,6 +748,12 @@ pub fn fill_poseidon2_rows(
         row[P2_ROUND_SEL + r] = Goldilocks::ONE;
         if (perm_id as usize) < P2_K_SEL_COUNT {
             row[P2_K_SEL + perm_id as usize] = Goldilocks::ONE;
+        }
+        if let Some(idx) = vote_id_sel {
+            row[P2_VOTE_ID_PRE_SEL + idx] = Goldilocks::ONE;
+        }
+        if let Some(idx) = inputs_prefix_sel {
+            row[P2_INPUTS_PREFIX_SEL + idx] = Goldilocks::ONE;
         }
 
         // Compute and fill S-box intermediates
@@ -696,7 +848,15 @@ pub fn generate_poseidon2_trace(
         if perm_idx < P2_K_SEL_COUNT {
             tracked_outputs[perm_idx] = trace.states[poseidon2::TOTAL_ROUNDS][0];
         }
-        next_row = fill_poseidon2_rows(&mut values, &trace, constants, perm_idx as u64, next_row);
+        next_row = fill_poseidon2_rows(
+            &mut values,
+            &trace,
+            constants,
+            perm_idx as u64,
+            next_row,
+            None,
+            None,
+        );
     }
 
     for row in 0..trace_height {
@@ -704,8 +864,39 @@ pub fn generate_poseidon2_trace(
         values[row_start + GLOBAL_KS..row_start + GLOBAL_KS + P2_K_SEL_COUNT]
             .copy_from_slice(&tracked_outputs);
     }
+    if let Some(first_input) = inputs.first() {
+        for row in 0..trace_height {
+            let row_start = row * TRACE_WIDTH;
+            for i in 0..5 {
+                values[row_start + GLOBAL_K_LIMBS + i] = first_input[i];
+            }
+        }
+    }
+    for row in 0..trace_height {
+        let row_start = row * TRACE_WIDTH;
+        for i in 0..P2_K_SEL_COUNT {
+            values[row_start + P2_K_SEL + i] = Goldilocks::ZERO;
+        }
+        values[row_start + P2_INPUTS_HASH_OUT] = Goldilocks::ZERO;
+        values[row_start + P2_VOTE_ID_OUT] = Goldilocks::ZERO;
+        for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
+            values[row_start + P2_VOTE_ID_PRE_SEL + i] = Goldilocks::ZERO;
+        }
+        for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
+            values[row_start + P2_INPUTS_PREFIX_SEL + i] = Goldilocks::ZERO;
+        }
+    }
 
     let public_row = next_row;
+    {
+        let row_start = public_row * TRACE_WIDTH;
+        let row = &mut values[row_start..row_start + TRACE_WIDTH];
+        let neutral = Point::NEUTRAL;
+        let _ = fill_scalar_mul_row(row, &neutral, &neutral, 0, 3);
+        row[IS_LAST_IN_PHASE] = Goldilocks::ONE;
+        row[IS_EC] = Goldilocks::ZERO;
+        row[IS_P2] = Goldilocks::ZERO;
+    }
     // Padding rows: IS_EC=0, IS_P2=0 (already zero from initialization)
     // Fill valid EC data for padding to avoid any constraint issues
     let neutral = Point::NEUTRAL;
@@ -837,6 +1028,7 @@ pub fn fill_ballot_validation_rows(
         // All 8 field values (for uniqueness cross-referencing)
         for j in 0..NUM_FIELDS {
             row[BV_FIELDS + j] = g(field_vals[j]);
+            row[BV_FIELD_MASKS + j] = g(((j as u64) < mode.num_fields) as u64);
         }
 
         // Config values (constant across all BV rows)
@@ -916,6 +1108,7 @@ pub fn fill_ballot_validation_rows(
     // Replicate field values and config
     for j in 0..NUM_FIELDS {
         bounds_row[BV_FIELDS + j] = g(field_vals[j]);
+        bounds_row[BV_FIELD_MASKS + j] = g(((j as u64) < mode.num_fields) as u64);
     }
     bounds_row[BV_NUM_FIELDS] = g(mode.num_fields);
     bounds_row[BV_ROW_INDEX] = g(NUM_FIELDS as u64); // index = 8 marks bounds row

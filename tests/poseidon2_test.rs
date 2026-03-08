@@ -8,7 +8,6 @@ use p3_dft::Radix2DitParallel;
 use p3_field::{Field, PrimeCharacteristicRing, extension::BinomialExtensionField};
 use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
-use p3_matrix::Matrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_poseidon2::{ExternalLayerConstants, Poseidon2};
 use p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation};
@@ -206,51 +205,6 @@ fn test_poseidon2_matches_upstream_horizen_variant_on_zisk_vector() {
         local, upstream,
         "local Poseidon2 width-8 must match upstream HL variant on ZisK vector"
     );
-}
-
-#[test]
-fn test_poseidon2_stark_proof() {
-    use davinci_stark::air::BallotAir;
-    use davinci_stark::trace::generate_poseidon2_trace;
-    let constants = Poseidon2Constants::new();
-
-    let mut input = [Goldilocks::ZERO; WIDTH];
-    input[0] = Goldilocks::from_u64(123);
-    input[1] = Goldilocks::from_u64(456);
-
-    let (trace, pv) = generate_poseidon2_trace(&[input], &constants);
-    println!("Poseidon2 trace: {}x{}", trace.height(), trace.width);
-
-    let air = BallotAir::new();
-    let config = make_poseidon_test_config();
-    let proof = prove(&config, &air, trace, &pv);
-    verify(&config, &air, &proof, &pv).expect("Poseidon2 proof verification failed");
-    println!("✅ Poseidon2 STARK proof verified!");
-}
-
-#[test]
-fn test_poseidon2_stark_multiple_perms() {
-    use davinci_stark::air::BallotAir;
-    use davinci_stark::trace::generate_poseidon2_trace;
-    let constants = Poseidon2Constants::new();
-
-    let inputs: Vec<[Goldilocks; WIDTH]> = (0..4)
-        .map(|i| {
-            let mut inp = [Goldilocks::ZERO; WIDTH];
-            inp[0] = Goldilocks::from_u64(i * 100 + 1);
-            inp[1] = Goldilocks::from_u64(i * 100 + 2);
-            inp
-        })
-        .collect();
-
-    let (trace, pv) = generate_poseidon2_trace(&inputs, &constants);
-    println!("Multi-perm trace: {}x{}", trace.height(), trace.width);
-
-    let air = BallotAir::new();
-    let config = make_poseidon_test_config();
-    let proof = prove(&config, &air, trace, &pv);
-    verify(&config, &air, &proof, &pv).expect("Multi-perm proof verification failed");
-    println!("✅ Multi-perm Poseidon2 STARK proof verified!");
 }
 
 #[test]

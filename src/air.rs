@@ -13,6 +13,7 @@
 //! The IS_EC and IS_P2 flags are themselves constrained to be binary and
 //! mutually exclusive on every row.
 
+use ecgfp5::curve::Point;
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
 use p3_field::{Algebra, PrimeCharacteristicRing};
 use p3_matrix::Matrix;
@@ -47,8 +48,8 @@ pub const PV_VOTE_ID: usize = 8;
 pub const PV_COUNT: usize = 9;
 
 /// BallotAir holds the Poseidon2 round constants that the constraint evaluator
-/// needs. These must match exactly what the trace generator used (hardcoded
-/// Zisk-compatible constants).
+/// needs. These must match exactly what the trace generator used (the upstream
+/// Plonky3 Horizen Labs constants used by ZisK).
 pub struct BallotAir {
     pub p2_constants: poseidon2::Poseidon2Constants,
 }
@@ -120,6 +121,21 @@ where
         // ============================================================
         eval_bv_constraints::<AB>(builder, &local, &next, &is_bv);
         eval_global_bindings::<AB>(builder, &local, &next);
+        eval_poseidon_statement_bindings::<AB>(builder, &local, &next, &public_values);
+
+        let inputs_hash_out: AB::Expr = local[P2_INPUTS_HASH_OUT].clone().into();
+        builder.assert_zero(inputs_hash_out.clone() * (inputs_hash_out.clone() - AB::Expr::ONE));
+        builder.assert_zero(inputs_hash_out.clone() * is_ec.clone());
+        builder.assert_zero(inputs_hash_out.clone() * is_p2.clone());
+        builder.assert_zero(inputs_hash_out.clone() * is_bv.clone());
+        builder.assert_zero(inputs_hash_out.clone() * (AB::Expr::ONE - next[IS_BV].clone().into()));
+        for i in 0..4 {
+            builder.assert_zero(
+                inputs_hash_out.clone()
+                    * (local[P2_STATE + i].clone().into()
+                        - public_values[PV_INPUTS_HASH + i].clone().into()),
+            );
+        }
 
         // ============================================================
         // First-row boundary: the accumulator starts at the neutral point.
@@ -234,6 +250,10 @@ fn eval_ec_constraints<AB: AirBuilder>(
     let global_fields: Vec<AB::Expr> = (0..GLOBAL_FIELDS_COUNT)
         .map(|i| local[GLOBAL_FIELDS + i].clone().into())
         .collect();
+    let global_pk_x: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK);
+    let global_pk_z: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK + 5);
+    let global_pk_u: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK + 10);
+    let global_pk_t: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK + 15);
 
     let next_acc_x: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_X);
     let next_acc_z: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_Z);
@@ -249,7 +269,20 @@ fn eval_ec_constraints<AB: AirBuilder>(
 
     // Bit validity: gate * bit * (1 - bit) = 0
     builder.assert_zero(gate.clone() * bit.clone() * (AB::Expr::ONE - bit.clone()));
-    builder.assert_zero(gate.clone() * bind_active.clone() * (bind_active.clone() - AB::Expr::ONE));
+    builder.assert_zero(gate.clone() * (bind_active.clone() - AB::Expr::ONE));
+
+    let selected_out_x = (0..5)
+        .map(|i| (AB::Expr::ONE - bit.clone()) * dbl_x[i].clone() + bit.clone() * add_x[i].clone())
+        .collect::<Vec<_>>();
+    let selected_out_z = (0..5)
+        .map(|i| (AB::Expr::ONE - bit.clone()) * dbl_z[i].clone() + bit.clone() * add_z[i].clone())
+        .collect::<Vec<_>>();
+    let selected_out_u = (0..5)
+        .map(|i| (AB::Expr::ONE - bit.clone()) * dbl_u[i].clone() + bit.clone() * add_u[i].clone())
+        .collect::<Vec<_>>();
+    let selected_out_t = (0..5)
+        .map(|i| (AB::Expr::ONE - bit.clone()) * dbl_t[i].clone() + bit.clone() * add_t[i].clone())
+        .collect::<Vec<_>>();
 
     let mut phase_sel_sum = AB::Expr::ZERO;
     let mut expected_phase = AB::Expr::ZERO;
@@ -270,12 +303,277 @@ fn eval_ec_constraints<AB: AirBuilder>(
     builder.assert_zero(
         gate.clone() * bind_active.clone() * (scalar_target.clone() - expected_target),
     );
+    let mut pk_phase_sel = AB::Expr::ZERO;
+    for (p, sel) in phase_selectors.iter().enumerate() {
+        if p % 3 == 1 {
+            pk_phase_sel = pk_phase_sel + sel.clone();
+        }
+    }
+    let generator = Point::GENERATOR;
+    let gen_x = [
+        AB::Expr::from_u64(generator.X.0[0].to_u64()),
+        AB::Expr::from_u64(generator.X.0[1].to_u64()),
+        AB::Expr::from_u64(generator.X.0[2].to_u64()),
+        AB::Expr::from_u64(generator.X.0[3].to_u64()),
+        AB::Expr::from_u64(generator.X.0[4].to_u64()),
+    ];
+    let gen_z = [
+        AB::Expr::from_u64(generator.Z.0[0].to_u64()),
+        AB::Expr::from_u64(generator.Z.0[1].to_u64()),
+        AB::Expr::from_u64(generator.Z.0[2].to_u64()),
+        AB::Expr::from_u64(generator.Z.0[3].to_u64()),
+        AB::Expr::from_u64(generator.Z.0[4].to_u64()),
+    ];
+    let gen_u = [
+        AB::Expr::from_u64(generator.U.0[0].to_u64()),
+        AB::Expr::from_u64(generator.U.0[1].to_u64()),
+        AB::Expr::from_u64(generator.U.0[2].to_u64()),
+        AB::Expr::from_u64(generator.U.0[3].to_u64()),
+        AB::Expr::from_u64(generator.U.0[4].to_u64()),
+    ];
+    let gen_t = [
+        AB::Expr::from_u64(generator.T.0[0].to_u64()),
+        AB::Expr::from_u64(generator.T.0[1].to_u64()),
+        AB::Expr::from_u64(generator.T.0[2].to_u64()),
+        AB::Expr::from_u64(generator.T.0[3].to_u64()),
+        AB::Expr::from_u64(generator.T.0[4].to_u64()),
+    ];
+    for i in 0..5 {
+        let is_generator_phase = phase_selectors
+            .iter()
+            .enumerate()
+            .filter(|(p, _)| p % 3 != 1)
+            .fold(AB::Expr::ZERO, |acc, (_, sel)| acc + sel.clone());
+        builder.assert_zero(
+            gate.clone() * is_generator_phase.clone() * (base_x[i].clone() - gen_x[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_generator_phase.clone() * (base_z[i].clone() - gen_z[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_generator_phase.clone() * (base_u[i].clone() - gen_u[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_generator_phase.clone() * (base_t[i].clone() - gen_t[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * pk_phase_sel.clone() * (base_x[i].clone() - global_pk_x[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * pk_phase_sel.clone() * (base_z[i].clone() - global_pk_z[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * pk_phase_sel.clone() * (base_u[i].clone() - global_pk_u[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * pk_phase_sel.clone() * (base_t[i].clone() - global_pk_t[i].clone()),
+        );
+    }
     builder.assert_zero(
         gate.clone()
             * bind_active.clone()
             * is_last.clone()
             * (scalar_acc.clone() - scalar_target.clone()),
     );
+
+    let c1_phase_sel: Vec<AB::Expr> = (0..NUM_FIELDS)
+        .map(|i| phase_selectors[3 * i].clone())
+        .collect();
+    let s_phase_sel: Vec<AB::Expr> = (0..NUM_FIELDS)
+        .map(|i| phase_selectors[3 * i + 1].clone())
+        .collect();
+    let m_phase_sel: Vec<AB::Expr> = (0..NUM_FIELDS)
+        .map(|i| phase_selectors[3 * i + 2].clone())
+        .collect();
+    let c1_phase_gate: AB::Expr = c1_phase_sel.iter().cloned().sum();
+    let s_phase_gate: AB::Expr = s_phase_sel.iter().cloned().sum();
+    let m_phase_gate: AB::Expr = m_phase_sel.iter().cloned().sum();
+
+    let mut expected_c1_enc: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_s_x: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_s_z: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_s_u: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_s_t: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_m_s_x: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_m_s_z: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_m_s_u: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_m_s_t: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_c2_x: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_c2_z: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_c2_u: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_c2_t: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_c2_enc: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
+    let mut expected_c2_inter: [[AB::Expr; 5]; 10] =
+        core::array::from_fn(|_| core::array::from_fn(|_| AB::Expr::ZERO));
+
+    for i in 0..NUM_FIELDS {
+        for j in 0..5 {
+            expected_c1_enc[j] = expected_c1_enc[j].clone()
+                + c1_phase_sel[i].clone() * local[GLOBAL_C1_ENC + i * 5 + j].clone().into();
+            expected_s_x[j] = expected_s_x[j].clone()
+                + s_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + j].clone().into();
+            expected_s_z[j] = expected_s_z[j].clone()
+                + s_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + 5 + j].clone().into();
+            expected_s_u[j] = expected_s_u[j].clone()
+                + s_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + 10 + j].clone().into();
+            expected_s_t[j] = expected_s_t[j].clone()
+                + s_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + 15 + j].clone().into();
+            expected_m_s_x[j] = expected_m_s_x[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + j].clone().into();
+            expected_m_s_z[j] = expected_m_s_z[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + 5 + j].clone().into();
+            expected_m_s_u[j] = expected_m_s_u[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + 10 + j].clone().into();
+            expected_m_s_t[j] = expected_m_s_t[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_S_POINTS + i * 20 + 15 + j].clone().into();
+            expected_c2_x[j] = expected_c2_x[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_C2_POINTS + i * 20 + j].clone().into();
+            expected_c2_z[j] = expected_c2_z[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_C2_POINTS + i * 20 + 5 + j].clone().into();
+            expected_c2_u[j] = expected_c2_u[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_C2_POINTS + i * 20 + 10 + j].clone().into();
+            expected_c2_t[j] = expected_c2_t[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_C2_POINTS + i * 20 + 15 + j].clone().into();
+            expected_c2_enc[j] = expected_c2_enc[j].clone()
+                + m_phase_sel[i].clone() * local[GLOBAL_C2_ENC + i * 5 + j].clone().into();
+            for k in 0..10 {
+                expected_c2_inter[k][j] = expected_c2_inter[k][j].clone()
+                    + m_phase_sel[i].clone()
+                        * local[GLOBAL_C2_ADD_INTER + i * 50 + k * 5 + j].clone().into();
+            }
+        }
+    }
+
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
+        expected_c1_enc.clone(),
+        selected_out_u.clone().try_into().unwrap(),
+        selected_out_t.clone().try_into().unwrap(),
+    ) {
+        builder.assert_zero(gate.clone() * is_last.clone() * c1_phase_gate.clone() * c);
+    }
+
+    for i in 0..5 {
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * s_phase_gate.clone() * (selected_out_x[i].clone() - expected_s_x[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * s_phase_gate.clone() * (selected_out_z[i].clone() - expected_s_z[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * s_phase_gate.clone() * (selected_out_u[i].clone() - expected_s_u[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * s_phase_gate.clone() * (selected_out_t[i].clone() - expected_s_t[i].clone()),
+        );
+    }
+
+    let c2_at1 = expected_c2_inter[0].clone();
+    let c2_at2 = expected_c2_inter[1].clone();
+    let c2_at3 = expected_c2_inter[2].clone();
+    let c2_at4 = expected_c2_inter[3].clone();
+    let c2_at5_raw = expected_c2_inter[4].clone();
+    let c2_at6_raw = expected_c2_inter[5].clone();
+    let c2_at8 = expected_c2_inter[6].clone();
+    let c2_at9 = expected_c2_inter[7].clone();
+    let c2_at10 = expected_c2_inter[8].clone();
+    let c2_u_pre = expected_c2_inter[9].clone();
+
+    let selected_out_x_arr: [AB::Expr; 5] = selected_out_x.clone().try_into().unwrap();
+    let selected_out_z_arr: [AB::Expr; 5] = selected_out_z.clone().try_into().unwrap();
+    let selected_out_u_arr: [AB::Expr; 5] = selected_out_u.clone().try_into().unwrap();
+    let selected_out_t_arr: [AB::Expr; 5] = selected_out_t.clone().try_into().unwrap();
+
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(selected_out_x_arr.clone(), expected_m_s_x.clone(), c2_at1.clone()) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(selected_out_z_arr.clone(), expected_m_s_z.clone(), c2_at2.clone()) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(selected_out_u_arr.clone(), expected_m_s_u.clone(), c2_at3.clone()) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(selected_out_t_arr.clone(), expected_m_s_t.clone(), c2_at4.clone()) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    let acc_x_plus_z = gfp5_add::<AB::F, AB::Expr>(selected_out_x_arr.clone(), selected_out_z_arr.clone());
+    let s_x_plus_z = gfp5_add::<AB::F, AB::Expr>(expected_m_s_x.clone(), expected_m_s_z.clone());
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_x_plus_z, s_x_plus_z, c2_at5_raw.clone()) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    let acc_u_plus_t = gfp5_add::<AB::F, AB::Expr>(selected_out_u_arr.clone(), selected_out_t_arr.clone());
+    let s_u_plus_t = gfp5_add::<AB::F, AB::Expr>(expected_m_s_u.clone(), expected_m_s_t.clone());
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_u_plus_t, s_u_plus_t, c2_at6_raw.clone()) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    let c2_t5 = gfp5_sub::<AB::F, AB::Expr>(
+        gfp5_sub::<AB::F, AB::Expr>(c2_at5_raw.clone(), c2_at1.clone()),
+        c2_at2.clone(),
+    );
+    let c2_t6 = gfp5_sub::<AB::F, AB::Expr>(
+        gfp5_sub::<AB::F, AB::Expr>(c2_at6_raw.clone(), c2_at3.clone()),
+        c2_at4.clone(),
+    );
+    let c2_t7 = gfp5_add::<AB::F, AB::Expr>(
+        c2_at1.clone(),
+        gfp5_mul_by_kz::<AB::F, AB::Expr>(B1, c2_at2.clone()),
+    );
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(c2_at4.clone(), c2_t7.clone(), c2_at8.clone()) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
+        c2_at3.clone(),
+        gfp5_add::<AB::F, AB::Expr>(
+            gfp5_mul_by_kz::<AB::F, AB::Expr>(2 * B1, c2_t5.clone()),
+            gfp5_scale::<AB::F, AB::Expr>(2, c2_t7.clone()),
+        ),
+        c2_at9.clone(),
+    ) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
+        gfp5_add::<AB::F, AB::Expr>(c2_at4.clone(), gfp5_scale::<AB::F, AB::Expr>(2, c2_at3.clone())),
+        gfp5_add::<AB::F, AB::Expr>(c2_t5.clone(), c2_t7.clone()),
+        c2_at10.clone(),
+    ) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
+        c2_t6.clone(),
+        gfp5_sub::<AB::F, AB::Expr>(
+            gfp5_mul_by_kz::<AB::F, AB::Expr>(B1, c2_at2.clone()),
+            c2_at1.clone(),
+        ),
+        c2_u_pre.clone(),
+    ) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
+    let expected_sum_x = gfp5_mul_by_kz::<AB::F, AB::Expr>(
+        B1,
+        gfp5_sub::<AB::F, AB::Expr>(c2_at10.clone(), c2_at8.clone()),
+    );
+    let expected_sum_z = gfp5_sub::<AB::F, AB::Expr>(c2_at8.clone(), c2_at9.clone());
+    let expected_sum_t = gfp5_add::<AB::F, AB::Expr>(c2_at8.clone(), c2_at9.clone());
+    for i in 0..5 {
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * m_phase_gate.clone() * (expected_c2_x[i].clone() - expected_sum_x[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * m_phase_gate.clone() * (expected_c2_z[i].clone() - expected_sum_z[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * m_phase_gate.clone() * (expected_c2_u[i].clone() - c2_u_pre[i].clone()),
+        );
+        builder.assert_zero(
+            gate.clone() * is_last.clone() * m_phase_gate.clone() * (expected_c2_t[i].clone() - expected_sum_t[i].clone()),
+        );
+    }
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
+        expected_c2_enc.clone(),
+        expected_c2_u.clone(),
+        expected_c2_t.clone(),
+    ) {
+        builder.assert_zero(gate.clone() * is_last.clone() * m_phase_gate.clone() * c);
+    }
 
     // --- Doubling constraints (gated) ---
     // dbl_t1 = acc_Z * acc_T
@@ -621,6 +919,12 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
     let k_selectors: Vec<AB::Expr> = (0..P2_K_SEL_COUNT)
         .map(|i| local[P2_K_SEL + i].clone().into())
         .collect();
+    let vote_selectors: Vec<AB::Expr> = (0..P2_VOTE_ID_PRE_SEL_COUNT)
+        .map(|i| local[P2_VOTE_ID_PRE_SEL + i].clone().into())
+        .collect();
+    let input_selectors: Vec<AB::Expr> = (0..P2_INPUTS_PREFIX_SEL_COUNT)
+        .map(|i| local[P2_INPUTS_PREFIX_SEL + i].clone().into())
+        .collect();
 
     let mut selector_sum = AB::Expr::ZERO;
     for sel in &selectors {
@@ -780,6 +1084,12 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
         let next_k_selectors: Vec<AB::Expr> = (0..P2_K_SEL_COUNT)
             .map(|i| next[P2_K_SEL + i].clone().into())
             .collect();
+        let next_vote_selectors: Vec<AB::Expr> = (0..P2_VOTE_ID_PRE_SEL_COUNT)
+            .map(|i| next[P2_VOTE_ID_PRE_SEL + i].clone().into())
+            .collect();
+        let next_input_selectors: Vec<AB::Expr> = (0..P2_INPUTS_PREFIX_SEL_COUNT)
+            .map(|i| next[P2_INPUTS_PREFIX_SEL + i].clone().into())
+            .collect();
         let both_p2 = gate.clone() * next_is_p2.clone();
 
         for i in 0..poseidon2::WIDTH {
@@ -798,6 +1108,16 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
         for i in 0..P2_K_SEL_COUNT {
             when_trans.assert_zero(
                 both_p2.clone() * (next_k_selectors[i].clone() - k_selectors[i].clone()),
+            );
+        }
+        for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
+            when_trans.assert_zero(
+                both_p2.clone() * (next_vote_selectors[i].clone() - vote_selectors[i].clone()),
+            );
+        }
+        for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
+            when_trans.assert_zero(
+                both_p2.clone() * (next_input_selectors[i].clone() - input_selectors[i].clone()),
             );
         }
     }
@@ -827,6 +1147,47 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
                         - partial_next[0].clone() * is_partial.clone()),
             );
         }
+
+        let mut expected_next_vote = vec![AB::Expr::ZERO; P2_VOTE_ID_PRE_SEL_COUNT];
+        let mut expected_next_input = vec![AB::Expr::ZERO; P2_INPUTS_PREFIX_SEL_COUNT];
+        expected_next_vote[0] = k_selectors[7].clone();
+        for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
+            if i + 1 < P2_VOTE_ID_PRE_SEL_COUNT {
+                expected_next_vote[i + 1] = expected_next_vote[i + 1].clone() + vote_selectors[i].clone();
+            } else {
+                expected_next_input[0] = expected_next_input[0].clone() + vote_selectors[i].clone();
+            }
+        }
+        for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
+            if i + 1 < P2_INPUTS_PREFIX_SEL_COUNT {
+                expected_next_input[i + 1] =
+                    expected_next_input[i + 1].clone() + input_selectors[i].clone();
+            }
+        }
+
+        for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
+            when_trans.assert_zero(
+                local_to_gap.clone()
+                    * (next[P2_VOTE_ID_PRE_SEL + i].clone().into() - expected_next_vote[i].clone()),
+            );
+        }
+        for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
+            when_trans.assert_zero(
+                local_to_gap.clone()
+                    * (next[P2_INPUTS_PREFIX_SEL + i].clone().into()
+                        - expected_next_input[i].clone()),
+            );
+        }
+        when_trans.assert_zero(
+            local_to_gap.clone()
+                * (next[P2_VOTE_ID_OUT].clone().into()
+                    - vote_selectors[P2_VOTE_ID_PRE_SEL_COUNT - 1].clone()),
+        );
+        when_trans.assert_zero(
+            local_to_gap
+                * (next[P2_INPUTS_HASH_OUT].clone().into()
+                    - input_selectors[P2_INPUTS_PREFIX_SEL_COUNT - 1].clone()),
+        );
     }
 }
 
@@ -843,6 +1204,70 @@ fn eval_global_bindings<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], nex
     for i in 0..GLOBAL_FIELDS_COUNT {
         when_trans.assert_zero(
             next[GLOBAL_FIELDS + i].clone().into() - local[GLOBAL_FIELDS + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_BV_PARAMS_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_BV_PARAMS + i].clone().into() - local[GLOBAL_BV_PARAMS + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_PACKED_MODE_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_PACKED_MODE + i].clone().into()
+                - local[GLOBAL_PACKED_MODE + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_PROCESS_ID_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_PROCESS_ID + i].clone().into()
+                - local[GLOBAL_PROCESS_ID + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_K_LIMBS_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_K_LIMBS + i].clone().into() - local[GLOBAL_K_LIMBS + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_PK_COUNT {
+        when_trans
+            .assert_zero(next[GLOBAL_PK + i].clone().into() - local[GLOBAL_PK + i].clone().into());
+    }
+    for i in 0..GLOBAL_S_POINTS_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_S_POINTS + i].clone().into() - local[GLOBAL_S_POINTS + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_C2_POINTS_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_C2_POINTS + i].clone().into() - local[GLOBAL_C2_POINTS + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_C1_ENC_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_C1_ENC + i].clone().into() - local[GLOBAL_C1_ENC + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_C2_ENC_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_C2_ENC + i].clone().into() - local[GLOBAL_C2_ENC + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_HASH_INPUT_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_HASH_INPUT + i].clone().into()
+                - local[GLOBAL_HASH_INPUT + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_C2_ADD_INTER_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_C2_ADD_INTER + i].clone().into()
+                - local[GLOBAL_C2_ADD_INTER + i].clone().into(),
+        );
+    }
+    for i in 0..GLOBAL_PACKED_MODE_BITS_COUNT {
+        when_trans.assert_zero(
+            next[GLOBAL_PACKED_MODE_BITS + i].clone().into()
+                - local[GLOBAL_PACKED_MODE_BITS + i].clone().into(),
         );
     }
 
@@ -863,6 +1288,227 @@ fn eval_global_bindings<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], nex
                 * next_is_p2.clone()
                 * (next[P2_K_SEL + i].clone().into() - local[P2_K_SEL + i - 1].clone().into()),
         );
+    }
+}
+
+fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>(
+    builder: &mut AB,
+    local: &[AB::Var],
+    next: &[AB::Var],
+    public_values: &[AB::PublicVar],
+) {
+    let col = |c: usize| -> AB::Expr { local[c].clone().into() };
+    let ncol = |c: usize| -> AB::Expr { next[c].clone().into() };
+    let mat4 = |a: &AB::Expr, b: &AB::Expr, c: &AB::Expr, d: &AB::Expr| -> [AB::Expr; 4] {
+        let t0 = a.clone() + b.clone();
+        let t1 = c.clone() + d.clone();
+        let t2 = b.clone() + b.clone() + t1.clone();
+        let t3 = d.clone() + d.clone() + t0.clone();
+        let t1_2 = t1.clone() + t1;
+        let t0_2 = t0.clone() + t0;
+        let t4 = t1_2.clone() + t1_2 + t3.clone();
+        let t5 = t0_2.clone() + t0_2 + t2.clone();
+        let t6 = t3 + t5.clone();
+        let t7 = t2 + t4.clone();
+        [t6, t5, t7, t4]
+    };
+
+    {
+        let mut first = builder.when_first_row();
+        let mut expected_hash_input = Vec::with_capacity(GLOBAL_HASH_INPUT_COUNT);
+        for i in 0..4 {
+            expected_hash_input.push(col(GLOBAL_PROCESS_ID + i));
+        }
+        for i in 0..4 {
+            expected_hash_input.push(col(GLOBAL_PACKED_MODE + i));
+        }
+        for i in 0..GLOBAL_PK_COUNT {
+            expected_hash_input.push(col(GLOBAL_PK + i));
+        }
+        for i in 0..4 {
+            expected_hash_input.push(public_values[PV_ADDRESS + i].clone().into());
+        }
+        expected_hash_input.push(public_values[PV_VOTE_ID].clone().into());
+        for i in 0..NUM_FIELDS {
+            for j in 0..5 {
+                expected_hash_input.push(col(GLOBAL_C1_ENC + i * 5 + j));
+            }
+            for j in 0..5 {
+                expected_hash_input.push(col(GLOBAL_C2_ENC + i * 5 + j));
+            }
+        }
+        expected_hash_input.push(col(GLOBAL_BV_WEIGHT));
+        while expected_hash_input.len() < GLOBAL_HASH_INPUT_COUNT {
+            expected_hash_input.push(AB::Expr::ZERO);
+        }
+        for (i, expected) in expected_hash_input.into_iter().enumerate() {
+            first.assert_zero(col(GLOBAL_HASH_INPUT + i) - expected);
+        }
+
+        for bit_idx in 0..GLOBAL_PACKED_MODE_BITS_COUNT {
+            let bit = col(GLOBAL_PACKED_MODE_BITS + bit_idx);
+            first.assert_zero(bit.clone() * (bit.clone() - AB::Expr::ONE));
+        }
+
+        for chunk in 0..GLOBAL_PACKED_MODE_COUNT {
+            let mut chunk_value = AB::Expr::ZERO;
+            let mut pow2 = AB::Expr::ONE;
+            for bit in 0..62 {
+                chunk_value = chunk_value + pow2.clone() * col(GLOBAL_PACKED_MODE_BITS + chunk * 62 + bit);
+                pow2 = pow2 * AB::Expr::from_u64(2);
+            }
+            first.assert_zero(col(GLOBAL_PACKED_MODE + chunk) - chunk_value);
+        }
+
+        let decode_bits = |start: usize, width: usize| -> AB::Expr {
+            let mut acc = AB::Expr::ZERO;
+            let mut pow2 = AB::Expr::ONE;
+            for bit_idx in 0..width {
+                acc = acc + pow2.clone() * col(GLOBAL_PACKED_MODE_BITS + start + bit_idx);
+                pow2 = pow2 * AB::Expr::from_u64(2);
+            }
+            acc
+        };
+
+        first.assert_zero(col(GLOBAL_BV_NUM_FIELDS) - decode_bits(0, 8));
+        first.assert_zero(col(GLOBAL_BV_GROUP_SIZE) - decode_bits(8, 8));
+        first.assert_zero(col(GLOBAL_BV_UNIQUE) - decode_bits(16, 1));
+        first.assert_zero(col(GLOBAL_BV_COST_FROM_WEIGHT) - decode_bits(17, 1));
+        first.assert_zero(col(GLOBAL_BV_COST_EXP) - decode_bits(18, 8));
+        first.assert_zero(col(GLOBAL_BV_MAX_VALUE) - decode_bits(26, 48));
+        first.assert_zero(col(GLOBAL_BV_MIN_VALUE) - decode_bits(74, 48));
+        first.assert_zero(col(GLOBAL_BV_MAX_SUM) - decode_bits(122, 63));
+        first.assert_zero(col(GLOBAL_BV_MIN_SUM) - decode_bits(185, 63));
+    }
+
+    for k_idx in 0..P2_K_SEL_COUNT {
+        let gate = col(IS_P2) * col(P2_ROUND_SEL) * col(P2_K_SEL + k_idx);
+        let mut input = [
+            AB::Expr::ZERO,
+            AB::Expr::ZERO,
+            AB::Expr::ZERO,
+            AB::Expr::ZERO,
+            AB::Expr::ZERO,
+            AB::Expr::ZERO,
+            AB::Expr::ZERO,
+            AB::Expr::ZERO,
+        ];
+        if k_idx == 0 {
+            for i in 0..5 {
+                input[i] = col(GLOBAL_K_LIMBS + i);
+            }
+        } else {
+            input[0] = col(GLOBAL_KS + k_idx - 1);
+        }
+        let fb0 = mat4(&input[0], &input[1], &input[2], &input[3]);
+        let fb1 = mat4(&input[4], &input[5], &input[6], &input[7]);
+        for i in 0..4 {
+            let sum = fb0[i].clone() + fb1[i].clone();
+            builder.assert_zero(gate.clone() * (col(P2_STATE + i) - (fb0[i].clone() + sum.clone())));
+            builder.assert_zero(gate.clone() * (col(P2_STATE + 4 + i) - (fb1[i].clone() + sum)));
+        }
+    }
+
+    let vote_out = col(P2_VOTE_ID_OUT);
+    builder.assert_zero(vote_out.clone() * (vote_out.clone() - AB::Expr::ONE));
+    builder.assert_zero(vote_out.clone() * col(IS_EC));
+    builder.assert_zero(vote_out.clone() * col(IS_P2));
+    builder.assert_zero(vote_out.clone() * col(IS_BV));
+
+    let mut raw_bits = AB::Expr::ZERO;
+    let mut low63 = AB::Expr::ZERO;
+    let mut pow2 = AB::Expr::ONE;
+    for b in 0..P2_VOTE_ID_BITS_COUNT {
+        let bit = col(P2_VOTE_ID_BITS + b);
+        builder.assert_zero(vote_out.clone() * bit.clone() * (bit.clone() - AB::Expr::ONE));
+        raw_bits = raw_bits + pow2.clone() * bit.clone();
+        if b < 63 {
+            low63 = low63 + pow2.clone() * bit;
+        }
+        pow2 = pow2 * AB::Expr::from_u64(2);
+    }
+    builder.assert_zero(vote_out.clone() * (col(P2_STATE) - raw_bits));
+    builder.assert_zero(
+        vote_out.clone()
+            * (public_values[PV_VOTE_ID].clone().into()
+                - (low63 + AB::Expr::from_u64(1u64 << 63))),
+    );
+
+    let vote_sel: Vec<AB::Expr> = (0..P2_VOTE_ID_PRE_SEL_COUNT)
+        .map(|i| col(P2_VOTE_ID_PRE_SEL + i))
+        .collect();
+    let inputs_sel: Vec<AB::Expr> = (0..P2_INPUTS_PREFIX_SEL_COUNT)
+        .map(|i| col(P2_INPUTS_PREFIX_SEL + i))
+        .collect();
+    let current_gap = AB::Expr::ONE - col(IS_EC) - col(IS_P2) - col(IS_BV);
+    let preperm_gate = current_gap.clone() * ncol(IS_P2) * (AB::Expr::ONE - ncol(P2_ROUND));
+    let mut active = AB::Expr::ZERO;
+    for sel in vote_sel.iter().chain(inputs_sel.iter()) {
+        builder.assert_zero(sel.clone() * (sel.clone() - AB::Expr::ONE));
+        active = active + sel.clone();
+    }
+    builder.assert_zero(active.clone() * (active.clone() - AB::Expr::ONE));
+    for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
+        builder.assert_zero(preperm_gate.clone() * (ncol(P2_VOTE_ID_PRE_SEL + i) - vote_sel[i].clone()));
+    }
+    for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
+        builder.assert_zero(
+            preperm_gate.clone() * (ncol(P2_INPUTS_PREFIX_SEL + i) - inputs_sel[i].clone()),
+        );
+    }
+    builder.assert_zero(preperm_gate.clone() * (ncol(P2_PERM_ID) - col(P2_PERM_ID) - AB::Expr::ONE));
+    builder.assert_zero(preperm_gate.clone() * ncol(P2_INPUTS_HASH_OUT));
+    builder.assert_zero(preperm_gate.clone() * ncol(P2_VOTE_ID_OUT));
+
+    let mut expected_chunk = [AB::Expr::ZERO, AB::Expr::ZERO, AB::Expr::ZERO, AB::Expr::ZERO];
+    for i in 0..4 {
+        expected_chunk[i] = expected_chunk[i].clone()
+            + vote_sel[0].clone() * col(GLOBAL_PROCESS_ID + i)
+            + vote_sel[1].clone() * public_values[PV_ADDRESS + i].clone().into()
+            ;
+    }
+    for i in 0..4 {
+        expected_chunk[i] = expected_chunk[i].clone() + vote_sel[2].clone() * col(GLOBAL_K_LIMBS + i);
+    }
+    expected_chunk[0] = expected_chunk[0].clone() + vote_sel[3].clone() * col(GLOBAL_K_LIMBS + 4);
+    for chunk_idx in 0..P2_INPUTS_PREFIX_SEL_COUNT {
+        for i in 0..4 {
+            expected_chunk[i] = expected_chunk[i].clone()
+                + inputs_sel[chunk_idx].clone() * col(GLOBAL_HASH_INPUT + chunk_idx * 4 + i);
+        }
+    }
+    for i in 0..4 {
+        builder.assert_zero(preperm_gate.clone() * active.clone() * (col(P2_ABSORB_CHUNK + i) - expected_chunk[i].clone()));
+    }
+
+    let first_hash = vote_sel[0].clone() + inputs_sel[0].clone();
+    let continuing = active.clone() - first_hash.clone();
+    let mut absorbed = [
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+    ];
+    for i in 0..8 {
+        let prev_lane = col(P2_STATE + i);
+        let chunk = if i < 4 {
+            col(P2_ABSORB_CHUNK + i)
+        } else {
+            AB::Expr::ZERO
+        };
+        absorbed[i] = continuing.clone() * (prev_lane.clone() + chunk.clone()) + first_hash.clone() * chunk;
+    }
+
+    let fb0 = mat4(&absorbed[0], &absorbed[1], &absorbed[2], &absorbed[3]);
+    let fb1 = mat4(&absorbed[4], &absorbed[5], &absorbed[6], &absorbed[7]);
+    for i in 0..4 {
+        let sum = fb0[i].clone() + fb1[i].clone();
+        builder.assert_zero(preperm_gate.clone() * active.clone() * (ncol(P2_STATE + i) - (fb0[i].clone() + sum.clone())));
+        builder.assert_zero(preperm_gate.clone() * active.clone() * (ncol(P2_STATE + 4 + i) - (fb1[i].clone() + sum)));
     }
 }
 
@@ -915,7 +1561,7 @@ pub fn gfp5_mul_by_kz<F: PrimeCharacteristicRing, E: Algebra<F> + Clone>(
 ///   - All bit columns are binary (degree 2, gated -> degree 3)
 ///   - Range checks: bit recomposition matches (value - min) and (max - value)
 ///   - Power chain: sq[k] = sq[k-1]^2, acc chain for binary exponentiation
-///   - Uniqueness: (field[i] - field[j]) * inv[j] * mask * unique = mask * unique
+///   - Uniqueness: for active j != i, (field[i] - field[j]) * inv[j] = 1
 ///   - Cost sum transition: cost_sum[next_row] = cost_sum[current] + mask * power
 ///   - Bounds row: bit decomposition of (limit - cost) and (cost - min_sum)
 ///
@@ -937,6 +1583,19 @@ fn eval_bv_constraints<AB: AirBuilder>(
     let num_fields = col(BV_NUM_FIELDS);
     let min_val = col(BV_MIN_VALUE);
     let max_val = col(BV_MAX_VALUE);
+    let global_num_fields = col(GLOBAL_BV_NUM_FIELDS);
+    let global_min_value = col(GLOBAL_BV_MIN_VALUE);
+    let global_max_value = col(GLOBAL_BV_MAX_VALUE);
+    let global_unique = col(GLOBAL_BV_UNIQUE);
+    let global_cost_from_weight = col(GLOBAL_BV_COST_FROM_WEIGHT);
+    let global_cost_exp = col(GLOBAL_BV_COST_EXP);
+    let global_max_sum = col(GLOBAL_BV_MAX_SUM);
+    let global_min_sum = col(GLOBAL_BV_MIN_SUM);
+    let global_group_size = col(GLOBAL_BV_GROUP_SIZE);
+    let global_weight = col(GLOBAL_BV_WEIGHT);
+    let field_masks: Vec<AB::Expr> = (0..BV_FIELD_MASKS_COUNT)
+        .map(|i| col(BV_FIELD_MASKS + i))
+        .collect();
     let row_selectors: Vec<AB::Expr> = (0..BV_ROW_SEL_COUNT).map(|i| col(BV_ROW_SEL + i)).collect();
 
     let mut row_sel_sum = AB::Expr::ZERO;
@@ -948,9 +1607,44 @@ fn eval_bv_constraints<AB: AirBuilder>(
     }
     builder.assert_zero(gate.clone() * (row_sel_sum - AB::Expr::ONE));
     builder.assert_zero(gate.clone() * (row_idx.clone() - expected_row_idx));
+    builder.assert_zero(gate.clone() * (num_fields.clone() - global_num_fields));
+    builder.assert_zero(gate.clone() * (min_val.clone() - global_min_value));
+    builder.assert_zero(gate.clone() * (max_val.clone() - global_max_value));
+    builder.assert_zero(gate.clone() * (unique.clone() - global_unique));
+    builder.assert_zero(gate.clone() * (col(BV_COST_FROM_WEIGHT) - global_cost_from_weight));
+    builder.assert_zero(gate.clone() * (col(BV_COST_EXP) - global_cost_exp));
+    builder.assert_zero(gate.clone() * (col(BV_MAX_SUM) - global_max_sum));
+    builder.assert_zero(gate.clone() * (col(BV_MIN_SUM) - global_min_sum));
+    builder.assert_zero(gate.clone() * (col(BV_GROUP_SIZE) - global_group_size));
+    builder.assert_zero(gate.clone() * (col(BV_WEIGHT) - global_weight));
 
     // 1. Mask must be binary
     builder.assert_zero(gate.clone() * mask.clone() * (mask.clone() - AB::Expr::ONE));
+
+    let mut mask_sum = AB::Expr::ZERO;
+    for j in 0..BV_FIELD_MASKS_COUNT {
+        let field_mask = field_masks[j].clone();
+        builder
+            .assert_zero(gate.clone() * field_mask.clone() * (field_mask.clone() - AB::Expr::ONE));
+        mask_sum = mask_sum + field_mask.clone();
+        if j + 1 < BV_FIELD_MASKS_COUNT {
+            builder.assert_zero(
+                gate.clone() * field_masks[j + 1].clone() * (AB::Expr::ONE - field_mask.clone()),
+            );
+        }
+    }
+    builder.assert_zero(gate.clone() * (mask_sum - num_fields.clone()));
+
+    let mut selected_mask = AB::Expr::ZERO;
+    for j in 0..NUM_FIELDS {
+        selected_mask = selected_mask + row_selectors[j].clone() * field_masks[j].clone();
+    }
+    builder.assert_zero(
+        gate.clone()
+            * (AB::Expr::ONE - row_selectors[NUM_FIELDS].clone())
+            * (mask.clone() - selected_mask),
+    );
+    builder.assert_zero(gate.clone() * row_selectors[NUM_FIELDS].clone() * mask.clone());
 
     // 2. Unique flag must be binary
     builder.assert_zero(gate.clone() * unique.clone() * (unique.clone() - AB::Expr::ONE));
@@ -1058,26 +1752,30 @@ fn eval_bv_constraints<AB: AirBuilder>(
     // ------------------------------------------------
     // 9. Uniqueness constraints
     //
-    // On each row i, for each field j, we prove field[i] != field[j] (when both
-    // are active and uniqueness is required). The trick to handle the self-position
-    // j == row_idx gracefully is the identity:
+    // On each row i, for each active field j != i, prove diff != 0 by forcing
+    // inv = 1 / diff:
     //
-    //   diff^2 * inv - diff = 0
+    //   diff * inv - 1 = 0
     //
-    // where diff = field[i] - field[j] and inv = 1/diff.
+    // The one-hot row selectors identify the self-position, which is gated out.
     //
-    // When j != i: diff != 0, so this forces inv = 1/diff (proves inequality).
-    // When j == i: diff = 0, so 0 - 0 = 0 (trivially satisfied, no constraint needed).
-    //
-    // Degree analysis: diff is degree 1, diff^2 is 2, diff^2*inv is 3.
-    // With gating (gate * mask * unique): total degree 6, under the 7 limit.
+    // Degree analysis: diff is degree 1 and diff*inv is degree 2.
+    // With gating (gate * mask_i * mask_j * unique * not_self): total degree 6.
     // ------------------------------------------------
     for j in 0..NUM_FIELDS {
         let other_j = col(BV_FIELDS + j);
         let inv_j = col(BV_INV_DIFF + j);
         let diff_j = field_val_this_row.clone() - other_j;
-        let constraint = diff_j.clone() * diff_j.clone() * inv_j - diff_j;
-        builder.assert_zero(gate.clone() * mask.clone() * unique.clone() * constraint);
+        let not_self = AB::Expr::ONE - row_selectors[j].clone();
+        let constraint = diff_j * inv_j - AB::Expr::ONE;
+        builder.assert_zero(
+            gate.clone()
+                * mask.clone()
+                * field_masks[j].clone()
+                * unique.clone()
+                * not_self
+                * constraint,
+        );
     }
 
     // ------------------------------------------------
@@ -1250,6 +1948,11 @@ fn eval_bv_constraints<AB: AirBuilder>(
         for j in 0..NUM_FIELDS {
             builder.when_transition().assert_zero(
                 gate.clone() * next_is_bv.clone() * (ncol(BV_FIELDS + j) - col(BV_FIELDS + j)),
+            );
+            builder.when_transition().assert_zero(
+                gate.clone()
+                    * next_is_bv.clone()
+                    * (ncol(BV_FIELD_MASKS + j) - col(BV_FIELD_MASKS + j)),
             );
         }
 

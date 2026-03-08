@@ -28,7 +28,7 @@ pub struct Poseidon2Constants {
 }
 
 impl Poseidon2Constants {
-    /// Load the hardcoded Zisk-compatible round constants.
+    /// Load the upstream Plonky3 Horizen Labs constants used by the ZisK precompile.
     pub fn new() -> Self {
         let mut external_rc = Vec::with_capacity(ROUNDS_F);
         for round_group in HL_GOLDILOCKS_8_EXTERNAL_ROUND_CONSTANTS {

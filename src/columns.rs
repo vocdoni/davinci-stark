@@ -3,7 +3,7 @@
 //! The trace is a flat matrix where each row contains all the data for one step
 //! of computation. The columns are laid out so that EC scalar mul data and
 //! Poseidon2 hash data can share physical columns (they never run in the same
-//! row), while selectors and hidden linkage columns expand the full row width to 271.
+//! row), while selectors and hidden linkage columns expand the full row width to 1,581.
 //!
 //! This file just defines named constants for column offsets. The actual
 //! constraint logic that reads these columns lives in air.rs.
@@ -144,10 +144,54 @@ pub const GLOBAL_KS: usize = EC_PHASE_SEL + EC_PHASE_SEL_COUNT; // 247
 pub const GLOBAL_KS_COUNT: usize = 8;
 pub const GLOBAL_FIELDS: usize = GLOBAL_KS + GLOBAL_KS_COUNT; // 255
 pub const GLOBAL_FIELDS_COUNT: usize = 8;
+pub const GLOBAL_BV_PARAMS: usize = GLOBAL_FIELDS + GLOBAL_FIELDS_COUNT; // 263
+pub const GLOBAL_BV_PARAMS_COUNT: usize = 10;
+pub const GLOBAL_BV_NUM_FIELDS: usize = GLOBAL_BV_PARAMS;
+pub const GLOBAL_BV_MIN_VALUE: usize = GLOBAL_BV_PARAMS + 1;
+pub const GLOBAL_BV_MAX_VALUE: usize = GLOBAL_BV_PARAMS + 2;
+pub const GLOBAL_BV_UNIQUE: usize = GLOBAL_BV_PARAMS + 3;
+pub const GLOBAL_BV_COST_FROM_WEIGHT: usize = GLOBAL_BV_PARAMS + 4;
+pub const GLOBAL_BV_COST_EXP: usize = GLOBAL_BV_PARAMS + 5;
+pub const GLOBAL_BV_MAX_SUM: usize = GLOBAL_BV_PARAMS + 6;
+pub const GLOBAL_BV_MIN_SUM: usize = GLOBAL_BV_PARAMS + 7;
+pub const GLOBAL_BV_GROUP_SIZE: usize = GLOBAL_BV_PARAMS + 8;
+pub const GLOBAL_BV_WEIGHT: usize = GLOBAL_BV_PARAMS + 9;
+pub const GLOBAL_PACKED_MODE: usize = GLOBAL_BV_PARAMS + GLOBAL_BV_PARAMS_COUNT; // 273
+pub const GLOBAL_PACKED_MODE_COUNT: usize = 4;
+pub const GLOBAL_PROCESS_ID: usize = GLOBAL_PACKED_MODE + GLOBAL_PACKED_MODE_COUNT; // 277
+pub const GLOBAL_PROCESS_ID_COUNT: usize = 4;
+pub const GLOBAL_K_LIMBS: usize = GLOBAL_PROCESS_ID + GLOBAL_PROCESS_ID_COUNT; // 281
+pub const GLOBAL_K_LIMBS_COUNT: usize = 5;
+pub const GLOBAL_PK: usize = GLOBAL_K_LIMBS + GLOBAL_K_LIMBS_COUNT; // 286
+pub const GLOBAL_PK_COUNT: usize = 20;
+pub const GLOBAL_S_POINTS: usize = GLOBAL_PK + GLOBAL_PK_COUNT; // 306
+pub const GLOBAL_S_POINTS_COUNT: usize = 8 * 20;
+pub const GLOBAL_C2_POINTS: usize = GLOBAL_S_POINTS + GLOBAL_S_POINTS_COUNT; // 466
+pub const GLOBAL_C2_POINTS_COUNT: usize = 8 * 20;
+pub const GLOBAL_C1_ENC: usize = GLOBAL_C2_POINTS + GLOBAL_C2_POINTS_COUNT; // 626
+pub const GLOBAL_C1_ENC_COUNT: usize = 8 * 5;
+pub const GLOBAL_C2_ENC: usize = GLOBAL_C1_ENC + GLOBAL_C1_ENC_COUNT; // 666
+pub const GLOBAL_C2_ENC_COUNT: usize = 8 * 5;
+pub const GLOBAL_HASH_INPUT: usize = GLOBAL_C2_ENC + GLOBAL_C2_ENC_COUNT; // 706
+pub const GLOBAL_HASH_INPUT_COUNT: usize = 116;
+pub const GLOBAL_C2_ADD_INTER: usize = GLOBAL_HASH_INPUT + GLOBAL_HASH_INPUT_COUNT; // 822
+pub const GLOBAL_C2_ADD_INTER_COUNT: usize = 8 * 50;
+pub const GLOBAL_PACKED_MODE_BITS: usize = GLOBAL_C2_ADD_INTER + GLOBAL_C2_ADD_INTER_COUNT; // 1222
+pub const GLOBAL_PACKED_MODE_BITS_COUNT: usize = 248;
 
 /// Selectors for the first 8 Poseidon permutations (the k-derivation chain).
-pub const P2_K_SEL: usize = GLOBAL_FIELDS + GLOBAL_FIELDS_COUNT; // 263
+pub const P2_K_SEL: usize = GLOBAL_PACKED_MODE_BITS + GLOBAL_PACKED_MODE_BITS_COUNT; // 1470
 pub const P2_K_SEL_COUNT: usize = 8;
+pub const P2_INPUTS_HASH_OUT: usize = P2_K_SEL + P2_K_SEL_COUNT; // 1230
+pub const P2_VOTE_ID_OUT: usize = P2_INPUTS_HASH_OUT + 1; // 1231
+pub const P2_ABSORB_CHUNK: usize = P2_VOTE_ID_OUT + 1; // 1232
+pub const P2_ABSORB_CHUNK_COUNT: usize = 4;
+pub const P2_VOTE_ID_PRE_SEL: usize = P2_ABSORB_CHUNK + P2_ABSORB_CHUNK_COUNT; // 1236
+pub const P2_VOTE_ID_PRE_SEL_COUNT: usize = 4;
+pub const P2_INPUTS_PREFIX_SEL: usize = P2_VOTE_ID_PRE_SEL + P2_VOTE_ID_PRE_SEL_COUNT; // 1240
+pub const P2_INPUTS_PREFIX_SEL_COUNT: usize = 29;
+pub const P2_VOTE_ID_BITS: usize = P2_INPUTS_PREFIX_SEL + P2_INPUTS_PREFIX_SEL_COUNT; // 1269
+pub const P2_VOTE_ID_BITS_COUNT: usize = 64;
 
 // ==========================================================================
 // Poseidon2 columns (active when IS_P2 = 1)
@@ -202,45 +246,50 @@ pub const P2_SBOX_X7: usize = 35; // 8 columns (35..42)
 /// (e.g. uniqueness checks need access to all fields from each row).
 pub const BV_FIELDS: usize = 0; // cols 0..7
 
+/// Active-field mask replicated on every BV row. This is the Circom
+/// `MaskGeneratorBounded` output for the current `num_fields`.
+pub const BV_FIELD_MASKS: usize = 8; // cols 8..15
+pub const BV_FIELD_MASKS_COUNT: usize = 8;
+
 /// Number of active vote fields (num_fields from ballot mode).
-pub const BV_NUM_FIELDS: usize = 8;
+pub const BV_NUM_FIELDS: usize = BV_FIELD_MASKS + BV_FIELD_MASKS_COUNT; // 16
 
 /// Index of the field being checked on this row (0..7 for field rows, 8 for bounds row).
-pub const BV_ROW_INDEX: usize = 9;
+pub const BV_ROW_INDEX: usize = BV_NUM_FIELDS + 1; // 17
 
 /// Mask bit: 1 if this field is active (index < num_fields), 0 otherwise.
-pub const BV_MASK: usize = 10;
+pub const BV_MASK: usize = BV_ROW_INDEX + 1; // 18
 
 /// Minimum allowed field value (from ballot mode, replicated on each row).
-pub const BV_MIN_VALUE: usize = 11;
+pub const BV_MIN_VALUE: usize = BV_MASK + 1; // 19
 
 /// Maximum allowed field value (from ballot mode, replicated on each row).
-pub const BV_MAX_VALUE: usize = 12;
+pub const BV_MAX_VALUE: usize = BV_MIN_VALUE + 1; // 20
 
 /// unique_values flag from ballot mode (1 = enforce uniqueness).
-pub const BV_UNIQUE: usize = 13;
+pub const BV_UNIQUE: usize = BV_MAX_VALUE + 1; // 21
 
 /// cost_from_weight flag (0 = use max_value_sum as limit, 1 = use weight).
-pub const BV_COST_FROM_WEIGHT: usize = 14;
+pub const BV_COST_FROM_WEIGHT: usize = BV_UNIQUE + 1; // 22
 
 /// Cost exponent (the power to raise each field value to).
-pub const BV_COST_EXP: usize = 15;
+pub const BV_COST_EXP: usize = BV_COST_FROM_WEIGHT + 1; // 23
 
 /// Maximum sum of field^exponent values (upper bound on total cost).
-pub const BV_MAX_SUM: usize = 16;
+pub const BV_MAX_SUM: usize = BV_COST_EXP + 1; // 24
 
 /// Minimum sum of field^exponent values (lower bound on total cost).
-pub const BV_MIN_SUM: usize = 17;
+pub const BV_MIN_SUM: usize = BV_MAX_SUM + 1; // 25
 
 /// Voter weight (alternative upper bound when cost_from_weight=1).
-pub const BV_WEIGHT: usize = 18;
+pub const BV_WEIGHT: usize = BV_MIN_SUM + 1; // 26
 
 /// Group size from ballot mode.
-pub const BV_GROUP_SIZE: usize = 19;
+pub const BV_GROUP_SIZE: usize = BV_WEIGHT + 1; // 27
 
 /// 48-bit decomposition of (field_value - min_value). Proves field >= min.
-/// These 48 columns (20..67) each hold a single bit.
-pub const BV_LOW_BITS: usize = 20;
+/// These 48 columns each hold a single bit.
+pub const BV_LOW_BITS: usize = BV_GROUP_SIZE + 1; // 28
 pub const BV_LOW_BITS_COUNT: usize = 48;
 
 /// 48-bit decomposition of (max_value - field_value). Proves field <= max.
@@ -277,7 +326,7 @@ pub const BV_INV_DIFF_COUNT: usize = 8;
 
 /// On the bounds row (BV_ROW_INDEX=8):
 /// 63-bit decomposition of (limit - total_cost). Proves cost <= limit.
-pub const BV_LIMIT_BITS: usize = 20; // reuse low_bits columns on bounds row
+pub const BV_LIMIT_BITS: usize = BV_LOW_BITS; // reuse low_bits columns on bounds row
 pub const BV_LIMIT_BITS_COUNT: usize = 63;
 
 /// On the bounds row: 63-bit decomposition of (total_cost - min_sum).
@@ -328,7 +377,7 @@ pub const PUB_OUTPUTS: usize = 0;
 // ==========================================================================
 
 /// Total trace width including section flags and selector bits.
-pub const TRACE_WIDTH: usize = P2_K_SEL + P2_K_SEL_COUNT; // 271
+pub const TRACE_WIDTH: usize = P2_VOTE_ID_BITS + P2_VOTE_ID_BITS_COUNT; // 1581
 
 // ==========================================================================
 // Helpers
