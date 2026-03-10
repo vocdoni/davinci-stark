@@ -198,7 +198,7 @@ pub const P2_ROUND: usize = 8;
 pub const P2_ROUND_TYPE: usize = 9;
 
 /// Permutation ID: which hash call this row belongs to. Lets us track
-/// separate permutations (k-derivation, vote ID, inputs hash) in the trace.
+/// separate permutations for the k-derivation chain and vote-id computation.
 pub const P2_PERM_ID: usize = 10;
 
 /// S-box intermediate columns for degree reduction.

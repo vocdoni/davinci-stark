@@ -542,7 +542,7 @@ fn test_weight_hash_must_bind_to_bv_weight_rule() {
 }
 
 #[test]
-fn test_inputs_hash_public_values_must_bind_to_poseidon_section() {
+fn test_inputs_hash_public_values_must_bind_to_the_public_preimage() {
     let strict_inputs = base_ballot_inputs(
         [
             Scalar([1, 0, 0, 0, 0]),

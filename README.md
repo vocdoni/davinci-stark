@@ -685,7 +685,7 @@ davinci-stark/
 | `p3-field` | 0.4.2 | Field traits and extension fields |
 | `p3-matrix` | 0.4.2 | Row-major matrix for execution traces |
 | `p3-challenger` | 0.4.2 (patched) | Fiat-Shamir challenger; patch retained for wasm32 PoW correctness |
-| `ecgfp5` | local | ecgfp5 STARK-friendly elliptic curve |
+| `ecgfp5` | vendored local crate | ecgfp5 STARK-friendly elliptic curve |
 | `serde` + `postcard` | 1.x | Compact binary serialization |
 | `wasm-bindgen` | 0.2 | WASM bindings (wasm32 only) |
 | `getrandom` | 0.2 | System entropy (`crypto.getRandomValues` on WASM) |
@@ -702,7 +702,6 @@ davinci-stark/
 | Tool | Version | Purpose |
 |---|---|---|
 | Rust | ≥ 1.85 | Compiler (2024 edition) |
-| wasm-pack | ≥ 0.14 | WASM build tool |
 | Node.js | ≥ 18 | Webapp dev server |
 
 ---
@@ -715,9 +714,6 @@ davinci-stark/
 # Rust (if not installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# wasm-pack
-cargo install wasm-pack
-
 # Webapp dependencies
 cd webapp && npm install && cd ..
 ```
@@ -725,7 +721,7 @@ cd webapp && npm install && cd ..
 ### Quick start
 
 ```bash
-make build    # Build WASM package (~952 KB)
+make build    # Build WASM package (auto-installs wasm-pack via cargo if needed)
 make test     # Run the Rust test suite in release mode
 make serve    # Build WASM + start the Vite dev server
 make clean    # Remove all build artifacts
@@ -738,7 +734,7 @@ make clean    # Remove all build artifacts
 cargo test --release
 
 # Build WASM for the browser
-wasm-pack build --target web --release
+~/.cargo/bin/wasm-pack build --target web --release
 
 # Start the webapp dev server
 cd webapp && npx vite --host 0.0.0.0

@@ -80,8 +80,9 @@ pub fn generate_scalar_mul_trace_nbits(
 /// All inputs needed to generate a full ballot proof.
 ///
 /// These correspond to the private inputs in the circom ballot_proof circuit.
-/// The prover knows all of these; the verifier only sees the public values
-/// derived from them (inputs_hash, address, vote_id).
+/// The prover knows all of these; the verifier only sees the public statement
+/// derived from them (`inputs_hash`, `address`, `vote_id`, and the constrained
+/// `inputs_hash` preimage).
 pub struct BallotInputs {
     /// Encryption randomness (320-bit scalar)
     pub k: Scalar,
@@ -100,9 +101,10 @@ pub struct BallotInputs {
 }
 
 /// Everything the prover computes and makes available after proof generation.
-/// The verifier uses a subset of these (inputs_hash, address, vote_id) as
-/// public values baked into the proof. The C1/C2 points and derived keys
-/// are returned so the caller can publish them alongside the proof.
+/// The verifier uses the public statement (`inputs_hash`, `address`,
+/// `vote_id`, and the `inputs_hash` preimage) inside the proof. The C1/C2
+/// points and derived keys are returned so the caller can publish them
+/// alongside the proof.
 pub struct BallotOutputs {
     /// C1 points for each field
     pub c1: [Point; NUM_FIELDS],
@@ -264,7 +266,7 @@ impl BallotMode {
 ///        - field[i] * G    -> M[i]    (message point)
 ///      Each `M_i` phase is followed by a dedicated binding row that proves
 ///      `C2[i] = M[i] + S[i]` and binds the encoded ciphertext used by the
-///      inputs-hash section.
+///      public inputs-hash statement.
 ///
 ///   3. Vote ID: Poseidon2 sponge of (process_id, address, k) -> truncated hash
 ///
@@ -553,7 +555,17 @@ pub fn generate_full_ballot_trace(
     }
 
     // ============================================================
-    // Step 6: Build public values -- matches circom: {inputs_hash, address, vote_id}
+    // Step 6: Build public values
+    //
+    // Public statement layout:
+    //   - inputs_hash[4]
+    //   - address[4]
+    //   - vote_id[1]
+    //   - inputs_hash_preimage[114]
+    //
+    // The verifier recomputes inputs_hash externally from the AIR-bound
+    // preimage, matching the Circom statement without keeping an inputs-hash
+    // submachine inside the STARK trace.
     // ============================================================
     let mut pv = vec![Goldilocks::ZERO; PV_COUNT];
 

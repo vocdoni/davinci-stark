@@ -3,7 +3,9 @@
 //! This crate builds an Algebraic Intermediate Representation (AIR) over the
 //! Goldilocks field using Plonky3, proving that an ElGamal-encrypted ballot
 //! was constructed honestly. The circuit handles 8 vote fields, a Poseidon2
-//! k-derivation chain, vote ID computation, and an inputs hash.
+//! k-derivation chain, and vote ID computation. The Circom-compatible
+//! `inputs_hash` statement is represented as AIR-constrained public values and
+//! recomputed by the verifier.
 //!
 //! Everything compiles to WASM for in-browser proving.
 
@@ -34,7 +36,8 @@ pub struct BallotProof {
 }
 
 /// Prove a full 8-field ballot: ElGamal encryption of each field, k-derivation
-/// chain, vote ID computation, and inputs hash.
+/// chain, vote ID computation, and the Circom-compatible inputs-hash
+/// statement.
 ///
 /// Returns the proof and the computed outputs (C1/C2 points, vote_id, etc.)
 /// so the caller can use them for further processing or display.
@@ -54,8 +57,9 @@ pub fn prove_full_ballot(inputs: &BallotInputs) -> (BallotProof, BallotOutputs) 
 
 /// Verify a ballot proof against its public values.
 ///
-/// Reconstructs the STARK config (deterministic, same as the prover), then
-/// runs the Plonky3 verifier. Returns Ok(()) if the proof is valid.
+/// Reconstructs the STARK config (deterministic, same as the prover), runs the
+/// Plonky3 verifier, then recomputes the Circom-compatible `inputs_hash` from
+/// the AIR-bound public preimage and checks its address and vote-id slots.
 pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), String> {
     let config = make_verifier_config();
     let air = BallotAir::new();
