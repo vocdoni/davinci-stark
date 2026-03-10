@@ -8,8 +8,9 @@
 // sends an 'init' message before that finishes, we just re-send the
 // ready/error status once we know it.
 
-import init, { generate_keypair, prove_full, verify } from '../../pkg/davinci_stark.js';
+import init, { generate_keypair, prove_full_detailed, verify } from '../../pkg/davinci_stark.js';
 import wasmUrl from '../../pkg/davinci_stark_bg.wasm?url';
+import { buildWorkerResultMessage } from './proof_ui.js';
 
 let ready = false;
 let initError = null;
@@ -55,8 +56,26 @@ self.onmessage = async (e) => {
 
       case 'prove': {
         const { kBytes, fields, pkBytes, processId, address, weight, ballotMode } = payload;
-        const proofData = prove_full(kBytes, fields, pkBytes, processId, address, weight, ballotMode);
-        self.postMessage({ type: 'result', id, result: { proofData } });
+        const workerStart = performance.now();
+        const result = prove_full_detailed(
+          kBytes,
+          fields,
+          pkBytes,
+          processId,
+          address,
+          weight,
+          ballotMode,
+        );
+        const proofData = result.proofData;
+        const timings = {
+          wasmDecodeMs: result.decodeMs,
+          wasmTraceMs: result.traceMs,
+          wasmProveMs: result.proveMs,
+          wasmSerializeMs: result.serializeMs,
+          workerWallMs: performance.now() - workerStart,
+        };
+        const message = buildWorkerResultMessage(id, proofData, timings);
+        self.postMessage(message.message, message.transfer);
         break;
       }
 

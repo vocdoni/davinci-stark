@@ -5,6 +5,7 @@
 // the call() helper which returns a promise resolved when the worker replies.
 
 import { normalizeChoices, packBallotMode } from './ballot_config.js';
+import { bytesToHex, formatProofPreview, summarizeTimings } from './proof_ui.js';
 
 const logEl = document.getElementById('log');
 const metricKeygenEl = document.getElementById('metric-keygen');
@@ -69,11 +70,6 @@ function hexToBytes(hex) {
     bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
   }
   return bytes;
-}
-
-// Convert Uint8Array to lowercase hex string.
-function bytesToHex(bytes) {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // Encode a JS number as 8 bytes in little-endian u64 format.
@@ -142,6 +138,7 @@ window.doProve = async function() {
     setMetric(metricKeygenEl, `${keygenMs.toFixed(1)} ms`);
 
     // Build binary inputs
+    const packStart = performance.now();
     const kBytes = hexToBytes(kHex);
     const fields = new Uint8Array(8 * 8);
     for (let i = 0; i < 8; i++) {
@@ -158,6 +155,7 @@ window.doProve = async function() {
 
     const weightBytes = u64ToLeBytes(weight);
     const ballotMode = packBallotMode(config);
+    const inputPackMs = performance.now() - packStart;
 
     log('\n--- Full Ballot Proof ---', 'info');
     log(`Choices: [${choices.slice(0, config.numFields).join(', ')}]`);
@@ -172,17 +170,35 @@ window.doProve = async function() {
     });
     proofData = result.proofData;
     const elapsed = performance.now() - start;
+    const renderStart = performance.now();
+    const timings = summarizeTimings({
+      inputPackMs,
+      workerWallMs: result.timings?.workerWallMs ?? elapsed,
+      wasmDecodeMs: result.timings?.wasmDecodeMs ?? 0,
+      wasmTraceMs: result.timings?.wasmTraceMs ?? 0,
+      wasmProveMs: result.timings?.wasmProveMs ?? 0,
+      wasmSerializeMs: result.timings?.wasmSerializeMs ?? 0,
+      mainRenderMs: 0,
+    });
 
     log(`✅ Proof generated!`, 'success');
     log(`Proof size: ${proofData.length} bytes (${(proofData.length / 1024).toFixed(1)} KB)`);
     log(`⏱ ${(elapsed / 1000).toFixed(1)}s`, 'timing');
+    log(
+      `Timing breakdown: pack=${timings.inputPackMs}ms worker=${timings.workerWallMs}ms ` +
+      `decode=${timings.wasmDecodeMs}ms trace=${timings.wasmTraceMs}ms ` +
+      `prove=${timings.wasmProveMs}ms serialize=${timings.wasmSerializeMs}ms`,
+      'timing',
+    );
     setMetric(metricProveEl, `${(elapsed / 1000).toFixed(2)} s`);
     metricNoteEl.textContent =
       `FRI config: blowup 8, 34 queries, 0 PoW bits. Last proof size: ${(proofData.length / 1024).toFixed(1)} KB.`;
 
     // Show proof data
     document.getElementById('proof-card').style.display = 'block';
-    document.getElementById('proof-data').textContent = bytesToHex(proofData);
+    document.getElementById('proof-data').textContent = formatProofPreview(proofData);
+    timings.mainRenderMs = (performance.now() - renderStart).toFixed(2);
+    log(`Render=${timings.mainRenderMs}ms`, 'timing');
 
     document.getElementById('btn-prove').disabled = false;
     document.getElementById('btn-verify').disabled = false;

@@ -13,6 +13,7 @@
 
 use ecgfp5::curve::Point;
 use ecgfp5::scalar::Scalar;
+use js_sys::Date;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks;
 use wasm_bindgen::prelude::*;
@@ -44,6 +45,43 @@ pub fn generate_keypair(sk_bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+#[wasm_bindgen]
+pub struct ProveFullResult {
+    proof_data: Vec<u8>,
+    decode_ms: f64,
+    trace_ms: f64,
+    prove_ms: f64,
+    serialize_ms: f64,
+}
+
+#[wasm_bindgen]
+impl ProveFullResult {
+    #[wasm_bindgen(getter, js_name = proofData)]
+    pub fn proof_data(&self) -> Vec<u8> {
+        self.proof_data.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = decodeMs)]
+    pub fn decode_ms(&self) -> f64 {
+        self.decode_ms
+    }
+
+    #[wasm_bindgen(getter, js_name = traceMs)]
+    pub fn trace_ms(&self) -> f64 {
+        self.trace_ms
+    }
+
+    #[wasm_bindgen(getter, js_name = proveMs)]
+    pub fn prove_ms(&self) -> f64 {
+        self.prove_ms
+    }
+
+    #[wasm_bindgen(getter, js_name = serializeMs)]
+    pub fn serialize_ms(&self) -> f64 {
+        self.serialize_ms
+    }
+}
+
 /// Generate a full 8-field ballot proof (the main entry point for voting).
 ///
 /// All byte arrays use u64 little-endian encoding. Returns the serialized
@@ -67,6 +105,29 @@ pub fn prove_full(
     weight: &[u8],
     ballot_mode: &[u8],
 ) -> Result<Vec<u8>, JsValue> {
+    Ok(prove_full_detailed(
+        k_bytes,
+        fields,
+        pk_bytes,
+        process_id,
+        address,
+        weight,
+        ballot_mode,
+    )?
+    .proof_data)
+}
+
+#[wasm_bindgen]
+pub fn prove_full_detailed(
+    k_bytes: &[u8],
+    fields: &[u8],
+    pk_bytes: &[u8],
+    process_id: &[u8],
+    address: &[u8],
+    weight: &[u8],
+    ballot_mode: &[u8],
+) -> Result<ProveFullResult, JsValue> {
+    let decode_start = now_ms();
     let k = Scalar::decode_reduce(k_bytes);
     let pk = decode_pk(pk_bytes).map_err(|e| JsValue::from_str(&e))?;
 
@@ -120,10 +181,24 @@ pub fn prove_full(
         weight: Goldilocks::from_u64(w % Goldilocks::ORDER_U64),
         packed_ballot_mode: bm,
     };
+    let decode_ms = now_ms() - decode_start;
 
-    let (ballot_proof, _outputs) = crate::prove_full_ballot(&inputs);
+    let trace_start = now_ms();
+    let (trace, public_values, _outputs) = crate::trace::generate_full_ballot_trace(&inputs);
+    let trace_ms = now_ms() - trace_start;
 
+    let prove_start = now_ms();
+    let config = crate::config::make_prover_config();
+    let air = crate::air::BallotAir::new();
+    let proof = p3_uni_stark::prove(&config, &air, trace, &public_values);
+    let prove_ms = now_ms() - prove_start;
+
+    let ballot_proof = crate::BallotProof {
+        proof,
+        public_values,
+    };
     // Serialize proof + public values
+    let serialize_start = now_ms();
     let proof_bytes = postcard::to_allocvec(&ballot_proof.proof)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))?;
 
@@ -139,7 +214,18 @@ pub fn prove_full(
     out.extend_from_slice(&proof_len.to_le_bytes());
     out.extend_from_slice(&proof_bytes);
     out.extend_from_slice(&pv_bytes);
-    Ok(out)
+    let serialize_ms = now_ms() - serialize_start;
+    Ok(ProveFullResult {
+        proof_data: out,
+        decode_ms,
+        trace_ms,
+        prove_ms,
+        serialize_ms,
+    })
+}
+
+fn now_ms() -> f64 {
+    Date::now()
 }
 
 /// Verify a ballot proof from its wire-format byte representation.
