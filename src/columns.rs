@@ -139,6 +139,13 @@ pub const EC_SCALAR_TARGET: usize = EC_SCALAR_ACC + 1; // 222
 pub const EC_PHASE_SEL: usize = EC_SCALAR_TARGET + 1; // 223
 pub const EC_PHASE_SEL_COUNT: usize = 24;
 
+/// On dedicated C2 binding rows, we reuse the low EC area as:
+/// - `ACC_*` for the `M_i` point
+/// - `BASE_*` for the `S_i` point
+/// - `ADD_*` and `ADD_AT*` for the `C2_i = M_i + S_i` check
+/// - `DBL_X..DBL_X+5` for the encoded `C2_i`
+pub const C2_BIND_ENC: usize = DBL_X;
+
 /// Hidden global values replicated on every row and linked to multiple sections.
 pub const GLOBAL_KS: usize = EC_PHASE_SEL + EC_PHASE_SEL_COUNT; // 247
 pub const GLOBAL_KS_COUNT: usize = 8;
@@ -164,33 +171,24 @@ pub const GLOBAL_K_LIMBS: usize = GLOBAL_PROCESS_ID + GLOBAL_PROCESS_ID_COUNT; /
 pub const GLOBAL_K_LIMBS_COUNT: usize = 5;
 pub const GLOBAL_PK: usize = GLOBAL_K_LIMBS + GLOBAL_K_LIMBS_COUNT; // 286
 pub const GLOBAL_PK_COUNT: usize = 20;
-pub const GLOBAL_S_POINTS: usize = GLOBAL_PK + GLOBAL_PK_COUNT; // 306
-pub const GLOBAL_S_POINTS_COUNT: usize = 8 * 20;
-pub const GLOBAL_C2_POINTS: usize = GLOBAL_S_POINTS + GLOBAL_S_POINTS_COUNT; // 466
-pub const GLOBAL_C2_POINTS_COUNT: usize = 8 * 20;
-pub const GLOBAL_C1_ENC: usize = GLOBAL_C2_POINTS + GLOBAL_C2_POINTS_COUNT; // 626
+pub const CURRENT_S: usize = GLOBAL_PK + GLOBAL_PK_COUNT; // 306
+pub const CURRENT_S_COUNT: usize = 20;
+pub const GLOBAL_C1_ENC: usize = CURRENT_S + CURRENT_S_COUNT; // 326
 pub const GLOBAL_C1_ENC_COUNT: usize = 8 * 5;
-pub const GLOBAL_C2_ENC: usize = GLOBAL_C1_ENC + GLOBAL_C1_ENC_COUNT; // 666
+pub const GLOBAL_C2_ENC: usize = GLOBAL_C1_ENC + GLOBAL_C1_ENC_COUNT; // 366
 pub const GLOBAL_C2_ENC_COUNT: usize = 8 * 5;
-pub const GLOBAL_HASH_INPUT: usize = GLOBAL_C2_ENC + GLOBAL_C2_ENC_COUNT; // 706
-pub const GLOBAL_HASH_INPUT_COUNT: usize = 116;
-pub const GLOBAL_C2_ADD_INTER: usize = GLOBAL_HASH_INPUT + GLOBAL_HASH_INPUT_COUNT; // 822
-pub const GLOBAL_C2_ADD_INTER_COUNT: usize = 8 * 50;
-pub const GLOBAL_PACKED_MODE_BITS: usize = GLOBAL_C2_ADD_INTER + GLOBAL_C2_ADD_INTER_COUNT; // 1222
-pub const GLOBAL_PACKED_MODE_BITS_COUNT: usize = 248;
-
 /// Selectors for the first 8 Poseidon permutations (the k-derivation chain).
-pub const P2_K_SEL: usize = GLOBAL_PACKED_MODE_BITS + GLOBAL_PACKED_MODE_BITS_COUNT; // 1470
+pub const P2_K_SEL: usize = GLOBAL_C2_ENC + GLOBAL_C2_ENC_COUNT; // 406
 pub const P2_K_SEL_COUNT: usize = 8;
-pub const P2_INPUTS_HASH_OUT: usize = P2_K_SEL + P2_K_SEL_COUNT; // 1230
-pub const P2_VOTE_ID_OUT: usize = P2_INPUTS_HASH_OUT + 1; // 1231
-pub const P2_ABSORB_CHUNK: usize = P2_VOTE_ID_OUT + 1; // 1232
+pub const P2_INPUTS_HASH_OUT: usize = P2_K_SEL + P2_K_SEL_COUNT; // 414
+pub const P2_VOTE_ID_OUT: usize = P2_INPUTS_HASH_OUT + 1; // 415
+pub const P2_ABSORB_CHUNK: usize = P2_VOTE_ID_OUT + 1; // 416
 pub const P2_ABSORB_CHUNK_COUNT: usize = 4;
-pub const P2_VOTE_ID_PRE_SEL: usize = P2_ABSORB_CHUNK + P2_ABSORB_CHUNK_COUNT; // 1236
+pub const P2_VOTE_ID_PRE_SEL: usize = P2_ABSORB_CHUNK + P2_ABSORB_CHUNK_COUNT; // 420
 pub const P2_VOTE_ID_PRE_SEL_COUNT: usize = 4;
-pub const P2_INPUTS_PREFIX_SEL: usize = P2_VOTE_ID_PRE_SEL + P2_VOTE_ID_PRE_SEL_COUNT; // 1240
+pub const P2_INPUTS_PREFIX_SEL: usize = P2_VOTE_ID_PRE_SEL + P2_VOTE_ID_PRE_SEL_COUNT; // 424
 pub const P2_INPUTS_PREFIX_SEL_COUNT: usize = 29;
-pub const P2_VOTE_ID_BITS: usize = P2_INPUTS_PREFIX_SEL + P2_INPUTS_PREFIX_SEL_COUNT; // 1269
+pub const P2_VOTE_ID_BITS: usize = P2_INPUTS_PREFIX_SEL + P2_INPUTS_PREFIX_SEL_COUNT; // 453
 pub const P2_VOTE_ID_BITS_COUNT: usize = 64;
 
 // ==========================================================================
@@ -377,7 +375,7 @@ pub const PUB_OUTPUTS: usize = 0;
 // ==========================================================================
 
 /// Total trace width including section flags and selector bits.
-pub const TRACE_WIDTH: usize = P2_VOTE_ID_BITS + P2_VOTE_ID_BITS_COUNT; // 1581
+pub const TRACE_WIDTH: usize = P2_VOTE_ID_BITS + P2_VOTE_ID_BITS_COUNT; // 517
 
 // ==========================================================================
 // Helpers

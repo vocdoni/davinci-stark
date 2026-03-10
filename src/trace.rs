@@ -11,7 +11,7 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use crate::air::*;
 use crate::columns::*;
-use crate::ecgfp5_ops::fill_scalar_mul_row;
+use crate::ecgfp5_ops::{fill_addition, fill_scalar_mul_row};
 use crate::poseidon2::{self, Poseidon2Constants, Poseidon2Trace};
 
 /// Extract bit `bit_index` from a 320-bit scalar stored as five u64 limbs.
@@ -259,7 +259,9 @@ impl BallotMode {
 ///        - k_i * G         -> C1[i]   (encryption ephemeral point)
 ///        - k_i * PK        -> S[i]    (shared secret)
 ///        - field[i] * G    -> M[i]    (message point)
-///      Then C2[i] = M[i] + S[i] is computed outside the STARK.
+///      Each `M_i` phase is followed by a dedicated binding row that proves
+///      `C2[i] = M[i] + S[i]` and binds the encoded ciphertext used by the
+///      inputs-hash section.
 ///
 ///   3. Vote ID: Poseidon2 sponge of (process_id, address, k) -> truncated hash
 ///
@@ -417,21 +419,44 @@ pub fn generate_full_ballot_trace(
     // Step 5: Build trace matrix
     // ============================================================
     // Compute actual row counts
-    let ec_total_rows: usize = ec_row_counts.iter().sum();
+    let ec_total_rows: usize = ec_row_counts.iter().sum::<usize>() + NUM_FIELDS;
     let p2_perms = k_p2_traces.len() + vote_id_p2_traces.len() + inputs_hash_p2_traces.len();
     let p2_total_rows = p2_perms * (poseidon2::TOTAL_ROUNDS + 1);
     let bv_rows = NUM_FIELDS + 1; // 8 field rows + 1 bounds row
     let public_row_count = 1;
-    let data_rows = ec_total_rows + p2_total_rows + bv_rows + public_row_count;
+    let packed_mode_rows = 4;
+    let data_rows = packed_mode_rows + ec_total_rows + p2_total_rows + bv_rows + public_row_count;
     let total_rows = data_rows.next_power_of_two().max(64);
     let mut values = vec![Goldilocks::ZERO; total_rows * TRACE_WIDTH];
 
+    fill_packed_mode_rows(&mut values, &inputs.packed_ballot_mode);
+
     // Copy EC rows
-    let mut row_offset = 0;
+    let mut row_offset = packed_mode_rows;
     for (idx, phase_rows) in ec_rows.iter().enumerate() {
         let start = row_offset * TRACE_WIDTH;
         values[start..start + phase_rows.len()].copy_from_slice(phase_rows);
+        let phase_start_row = row_offset;
         row_offset += ec_row_counts[idx];
+        if idx % 3 == 2 {
+            let field_idx = idx / 3;
+            for row in phase_start_row..row_offset {
+                let row_start = row * TRACE_WIDTH;
+                let row = &mut values[row_start..row_start + TRACE_WIDTH];
+                write_point_coords(row, CURRENT_S, &s_points[field_idx]);
+            }
+            let row_start = row_offset * TRACE_WIDTH;
+            let row = &mut values[row_start..row_start + TRACE_WIDTH];
+            fill_c2_binding_row(
+                row,
+                field_idx,
+                &m_points[field_idx],
+                &s_points[field_idx],
+                &c2_points[field_idx],
+            );
+            write_point_coords(row, CURRENT_S, &s_points[field_idx]);
+            row_offset += 1;
+        }
     }
     let ec_end = row_offset;
 
@@ -528,22 +553,8 @@ pub fn generate_full_ballot_trace(
         let row_slice = &mut values[row_start..row_start + TRACE_WIDTH];
         write_point_coords(row_slice, GLOBAL_PK, &inputs.pk);
         for i in 0..NUM_FIELDS {
-            write_point_coords(row_slice, GLOBAL_S_POINTS + i * 20, &s_points[i]);
-            write_point_coords(row_slice, GLOBAL_C2_POINTS + i * 20, &c2_points[i]);
             write_point_encoding(row_slice, GLOBAL_C1_ENC + i * 5, &c1_points[i]);
             write_point_encoding(row_slice, GLOBAL_C2_ENC + i * 5, &c2_points[i]);
-            fill_c2_add_intermediates(row_slice, GLOBAL_C2_ADD_INTER + i * 50, &m_points[i], &s_points[i]);
-        }
-        for i in 0..GLOBAL_HASH_INPUT_COUNT {
-            values[row_start + GLOBAL_HASH_INPUT + i] = hash_input.get(i).copied().unwrap_or(Goldilocks::ZERO);
-        }
-        for chunk in 0..4 {
-            let chunk_val = inputs.packed_ballot_mode[chunk].as_canonical_u64();
-            for bit in 0..62 {
-                let bit_idx = chunk * 62 + bit;
-                values[row_start + GLOBAL_PACKED_MODE_BITS + bit_idx] =
-                    Goldilocks::from_bool(((chunk_val >> bit) & 1) != 0);
-            }
         }
     }
 
@@ -659,27 +670,31 @@ fn write_point_encoding(row: &mut [Goldilocks], offset: usize, p: &Point) {
     }
 }
 
-fn fill_c2_add_intermediates(row: &mut [Goldilocks], offset: usize, m: &Point, s: &Point) {
-    let at1 = m.X * s.X;
-    let at2 = m.Z * s.Z;
-    let at3 = m.U * s.U;
-    let at4 = m.T * s.T;
-    let at5_raw = (m.X + m.Z) * (s.X + s.Z);
-    let at6_raw = (m.U + m.T) * (s.U + s.T);
-    let t5 = at5_raw - at1 - at2;
-    let t6 = at6_raw - at3 - at4;
-    let t7 = at1 + at2.mul_small_k1(Point::B1);
-    let at8 = at4 * t7;
-    let at9 = at3 * (t5.mul_small_k1(2 * Point::B1) + t7.double());
-    let at10 = (at4 + at3.double()) * (t5 + t7);
-    let u_pre = t6 * (at2.mul_small_k1(Point::B1) - at1);
-
-    let inters = [at1, at2, at3, at4, at5_raw, at6_raw, at8, at9, at10, u_pre];
-    for (idx, val) in inters.iter().enumerate() {
-        for (j, limb) in val.0.iter().enumerate() {
-            row[offset + idx * 5 + j] = Goldilocks::from_u64(limb.to_u64());
+fn fill_packed_mode_rows(values: &mut [Goldilocks], packed_mode: &[Goldilocks; 4]) {
+    for chunk in 0..4 {
+        let row_start = chunk * TRACE_WIDTH;
+        let row = &mut values[row_start..row_start + TRACE_WIDTH];
+        row[P2_VOTE_ID_PRE_SEL + chunk] = Goldilocks::ONE;
+        let chunk_val = packed_mode[chunk].as_canonical_u64();
+        for bit in 0..62 {
+            row[P2_VOTE_ID_BITS + bit] = Goldilocks::from_bool(((chunk_val >> bit) & 1) != 0);
         }
     }
+}
+
+fn fill_c2_binding_row(
+    row: &mut [Goldilocks],
+    field_idx: usize,
+    m_point: &Point,
+    s_point: &Point,
+    c2_point: &Point,
+) {
+    write_point_coords(row, ACC_X, m_point);
+    write_point_coords(row, BASE_X, s_point);
+    fill_addition(row, m_point, s_point);
+    write_point_encoding(row, C2_BIND_ENC, c2_point);
+    row[EC_BIND_ACTIVE] = Goldilocks::ONE;
+    row[BV_ROW_SEL + field_idx] = Goldilocks::ONE;
 }
 
 fn annotate_poseidon_preperm_row(

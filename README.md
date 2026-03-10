@@ -12,14 +12,14 @@ system. It allows a prover to convince a verifier that a computation was perform
 without revealing the inputs to that computation.
 
 Concretely: a voter fills in their ballot (private), the prover generates a cryptographic
-proof (~430 KB) that the ballot satisfies all election rules, and a verifier can check the
+proof (~627 KB) that the ballot satisfies all election rules, and a verifier can check the
 proof in milliseconds without ever seeing the vote choices.
 
 ### How STARKs work (simplified)
 
 1. **Execution trace**: The computation is laid out as a 2D matrix. Each row represents a
    step of the computation, each column represents a register. For our ballot proof, this is
-   a 4,096 × 1,581 matrix over the Goldilocks field.
+   a 4,096 × 517 matrix over the Goldilocks field.
 
 2. **AIR constraints**: An Algebraic Intermediate Representation (AIR) defines polynomial
    equations that every pair of consecutive rows must satisfy. For example, "the next row's
@@ -76,8 +76,9 @@ The current STARK proves the following:
    reused across the ballot-validation, Poseidon2, and EC sections.
 3. **BallotCipher consistency**: For each field, the EC section proves
    `C1_i = k_i * G`, `S_i = k_i * PK`, `M_i = field_i * G`, and `C2_i = M_i + S_i`.
-   The `k_i * PK` phases are bound to the shared election public key `PK`, and the
-   encoded `C1_i` / `C2_i` values reused by the hash section are bound to those EC outputs.
+   The `k_i * PK` phases are bound to the shared election public key `PK`, and each
+   `field_i * G` phase is followed by a dedicated C2 binding row that proves `C2_i = M_i + S_i`
+   and binds the encoded `C1_i` / `C2_i` values reused by the hash section.
 4. **Deterministic vote ID**: `vote_id` is derived from a constrained Poseidon2 sponge over
    `{process_id, address, k_limbs}` and then truncated as `trunc63(hash) + 2^63`.
 5. **Inputs-hash consistency**: The constrained `inputs_hash` sponge absorbs the full shared
@@ -170,19 +171,25 @@ The process:
 
 4. **Hidden cross-section bindings**: Additional private columns replicate the shared ballot
    statement across the trace: derived `k_i` values, ballot field values, ballot-mode data,
-   process ID, original `k` limbs, and the election public key. The AIR binds Poseidon
-   outputs, EC scalar bits, and ballot-validation rows to those shared hidden values.
+   process ID, original `k` limbs, the election public key, a per-field carried `S_i`, and the
+   ciphertext encodings needed across sections. The AIR binds Poseidon outputs, EC scalar bits,
+   ballot-validation rows, and dedicated C2 binding rows to those shared hidden values.
 
 ### Trace layout
 
-The execution trace is a **4,096 × 1,581 matrix** over Goldilocks. Rows are divided into
-three sections using binary flag columns (`IS_EC`, `IS_P2`, `IS_BV`):
+The execution trace is a **4,096 × 517 matrix** over Goldilocks. Rows are divided into
+dedicated sections using binary flag columns (`IS_EC`, `IS_P2`, `IS_BV`) plus a small
+unflagged prefix for packed-ballot decoding:
 
 ```
 Row 0                                                Row 4095
 ┌─────────────────────────────────────────────────────────────┐
+│  Packed-mode rows (all flags = 0)                           │
+│  4 rows                                                      │
+│  → Exact in-circuit unpacking of `packed_ballot_mode`       │
+├─────────────────────────────────────────────────────────────┤
 │  EC Section (IS_EC=1)                                       │
-│  24 scalar multiplications × 64 rows each = 1,536 rows     │
+│  24 scalar multiplications × 64 rows + 8 C2 binding rows   │
 │  → ElGamal encryption verification for 8 vote fields       │
 ├─────────────────────────────────────────────────────────────┤
 │  Poseidon2 Section (IS_P2=1)                                │
@@ -204,7 +211,8 @@ Row 0                                                Row 4095
 ```
 
 **Column reuse**: EC, Poseidon2, and BV still reuse the first part of the row layout under
-section gating. The extra width comes from selector bits and hidden linkage columns:
+section gating. The extra width comes from selector bits, shared statement columns, and a
+small set of exact bit-decomposition columns:
 - Poseidon round selectors
 - BV row selectors
 - EC phase/scalar binding columns
@@ -212,7 +220,7 @@ section gating. The extra width comes from selector bits and hidden linkage colu
 - hidden global field values
 - hidden ballot-mode, process-ID, `k`-limb, and public-key values
 - Poseidon preimage chunk selectors and vote-id bit decomposition
-- packed-ballot-mode bit decomposition and exact in-circuit unpacking
+- dedicated packed-mode rows for exact in-circuit unpacking
 
 ### EC Section: ElGamal encryption (24 scalar multiplications)
 
@@ -229,7 +237,7 @@ shared public key carried in the statement columns.
 Each scalar mul uses the **double-and-add** algorithm, processing one bit per row.
 The derived keys `k_i` are 64-bit Goldilocks elements (derived from the master key `k`
 via Poseidon2), so we use 64-bit scalar muls instead of full 319-bit ones. This reduces
-the EC section from 7,656 rows to **1,536 rows** (24 muls × 64 bits).
+the EC section to **1,544 rows** (24 muls × 64 bits plus 8 dedicated C2 binding rows).
 
 **Column layout per EC row (178 columns):**
 
@@ -397,7 +405,7 @@ We use **HidingFriPcs** from Plonky3 to achieve real zero-knowledge:
 3. **Verifier independence**: The verifier never generates blinding codewords, so it can
    reconstruct the STARK configuration with a fixed seed.
 
-Without HidingFriPcs, the 34 FRI query positions would each reveal 1,581 Goldilocks field
+Without HidingFriPcs, the 34 FRI query positions would each reveal 517 Goldilocks field
 elements of the actual execution trace. With it, the verifier sees only random-looking
 values that satisfy the constraint checks but reveal nothing about the private inputs.
 
@@ -597,14 +605,14 @@ This project uses Poseidon2 in two separate contexts:
 
 | Metric | Value | Notes |
 |---|---|---|
-| Trace size | 4,096 × 1,581 | Includes selector bits, shared statement columns, and packed-mode bits |
+| Trace size | 4,096 × 517 | Includes selector bits, shared statement columns, and dedicated packed-mode rows |
 | Max constraint degree | 4 | Stored x7 columns + BV intermediates |
 | FRI blowup factor | 8 (`log_blowup = 3`) | Required by the completed AIR |
 | FRI queries | 34 | ~102-bit conjectured soundness, no PoW |
-| Native prove time | ~41.3s | Release mode, full 8-field ballot proof |
+| Native prove time | ~8.1s | Release mode, full 8-field ballot proof |
 | Native verify time | ~50ms | Release mode, full 8-field ballot proof |
 | WASM binary | ~952 KB | `wasm-pack build --target web --release`, no wasm-opt |
-| Proof size | ~430-500 KB | Depends on query openings and transcript layout |
+| Proof size | ~627 KB | Current release build, browser-oriented profile |
 
 HidingFriPcs (ZK mode) roughly doubles proving time compared to non-hiding mode because
 the trace polynomial is extended with blinding codewords.
@@ -617,7 +625,7 @@ the trace polynomial is extended with blinding codewords.
 | Curve | BabyJubJub over BN254 | ecgfp5 over Goldilocks |
 | Hash | Poseidon (BN254 scalar field) | Poseidon2 (Goldilocks, Zisk-compatible) |
 | Trusted setup | Required (powers of tau ceremony) | **None** (transparent) |
-| Proof size | ~200 bytes | ~430 KB |
+| Proof size | ~200 bytes | ~627 KB |
 | Prover time (browser) | Browser-dependent | Use the webapp timing panel on the target device |
 | Verifier time | ~5ms | ~1ms |
 | Ballot validation | Full (range, uniqueness, cost) | Full (range, uniqueness, cost, bounds) |
@@ -632,7 +640,7 @@ davinci-stark/
 ├── src/
 │   ├── air.rs            AIR constraint definitions (~1,100 lines)
 │   │                     EC, Poseidon2, and BV constraint sections
-│   ├── columns.rs        Trace column layout (1,581 columns, named constants)
+│   ├── columns.rs        Trace column layout (517 columns, named constants)
 │   ├── config.rs         STARK configuration (HidingFriPcs, FRI params, RNG)
 │   ├── ecgfp5_ops.rs     ecgfp5 point doubling/addition for trace generation
 │   ├── elgamal.rs        ElGamal keygen/encrypt helpers

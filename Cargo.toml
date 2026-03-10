@@ -58,7 +58,9 @@ p3-challenger = { path = "vendor/p3-challenger" }
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
