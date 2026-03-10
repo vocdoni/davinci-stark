@@ -23,3 +23,10 @@ export function buildWorkerResultMessage(id, proofData, timings) {
     transfer: [proofData.buffer],
   };
 }
+
+export function formatBuildCommit(commit) {
+  if (!commit || commit === 'unknown') {
+    return 'unknown';
+  }
+  return commit.slice(0, 12);
+}

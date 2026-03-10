@@ -21,6 +21,8 @@ use wasm_bindgen::prelude::*;
 use crate::air::NUM_FIELDS;
 use crate::trace::BallotInputs;
 
+const WASM_BUILD_COMMIT: &str = env!("WASM_BUILD_COMMIT");
+
 /// Set up the panic hook so Rust panics show readable messages in the
 /// browser console instead of just "unreachable executed". This runs
 /// automatically when the WASM module is instantiated.
@@ -43,6 +45,11 @@ pub fn generate_keypair(sk_bytes: &[u8]) -> Vec<u8> {
         out[i * 8..(i + 1) * 8].copy_from_slice(&enc.0[i].to_u64().to_le_bytes());
     }
     out
+}
+
+#[wasm_bindgen]
+pub fn wasm_build_commit() -> String {
+    WASM_BUILD_COMMIT.to_string()
 }
 
 #[wasm_bindgen]

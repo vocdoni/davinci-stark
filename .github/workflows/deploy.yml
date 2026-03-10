@@ -54,6 +54,8 @@ jobs:
         run: cargo check --target wasm32-unknown-unknown
 
       - name: Build WASM package
+        env:
+          WASM_BUILD_COMMIT: ${{ github.sha }}
         run: wasm-pack build --target web --release
 
       - name: Build webapp

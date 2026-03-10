@@ -5,13 +5,15 @@
 // the call() helper which returns a promise resolved when the worker replies.
 
 import { normalizeChoices, packBallotMode } from './ballot_config.js';
-import { bytesToHex, formatProofPreview, summarizeTimings } from './proof_ui.js';
+import { bytesToHex, formatBuildCommit, formatProofPreview, summarizeTimings } from './proof_ui.js';
+import { buildInfoText } from './build_info.js';
 
 const logEl = document.getElementById('log');
 const metricKeygenEl = document.getElementById('metric-keygen');
 const metricProveEl = document.getElementById('metric-prove');
 const metricVerifyEl = document.getElementById('metric-verify');
 const metricNoteEl = document.getElementById('metric-note');
+const buildInfoEl = document.getElementById('build-info');
 let pkBytes = null;
 let proofData = null;
 let msgId = 0;
@@ -25,6 +27,9 @@ worker.onmessage = (e) => {
   const { type, id, result, error } = e.data;
   if (type === 'ready') {
     log('✅ WASM module loaded in Web Worker', 'success');
+    if (buildInfoEl) {
+      buildInfoEl.textContent = buildInfoText(formatBuildCommit(e.data.buildCommit));
+    }
     log('Ready! Fill in your vote and click "Compute Inputs & Generate Proof".', 'info');
     return;
   }

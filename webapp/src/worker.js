@@ -8,7 +8,12 @@
 // sends an 'init' message before that finishes, we just re-send the
 // ready/error status once we know it.
 
-import init, { generate_keypair, prove_full_detailed, verify } from '../../pkg/davinci_stark.js';
+import init, {
+  generate_keypair,
+  prove_full_detailed,
+  verify,
+  wasm_build_commit,
+} from '../../pkg/davinci_stark.js';
 import wasmUrl from '../../pkg/davinci_stark_bg.wasm?url';
 import { buildWorkerResultMessage } from './proof_ui.js';
 
@@ -22,7 +27,7 @@ let initError = null;
     await init({ module_or_path: wasmUrl });
     ready = true;
     console.log('[worker] WASM ready');
-    self.postMessage({ type: 'ready' });
+    self.postMessage({ type: 'ready', buildCommit: wasm_build_commit() });
   } catch (err) {
     initError = err;
     console.error('[worker] WASM init failed:', err);
@@ -35,7 +40,7 @@ self.onmessage = async (e) => {
 
   if (type === 'init') {
     // Already auto-initializing; if done, re-send ready
-    if (ready) self.postMessage({ type: 'ready' });
+    if (ready) self.postMessage({ type: 'ready', buildCommit: wasm_build_commit() });
     else if (initError) self.postMessage({ type: 'init_error', error: initError.toString() });
     return;
   }
