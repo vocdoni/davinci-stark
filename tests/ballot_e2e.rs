@@ -8,12 +8,12 @@ use p3_uni_stark::{prove, verify};
 use ecgfp5::curve::Point;
 use ecgfp5::scalar::Scalar;
 
-use davinci_stark::air::{BallotAir, NUM_FIELDS, PV_VOTE_ID, SMALL_SCALAR_BITS};
+use davinci_stark::air::{
+    BallotAir, NUM_FIELDS, PV_INPUTS_PREIMAGE, PV_VOTE_ID, SMALL_SCALAR_BITS,
+};
 use davinci_stark::columns::{
-    BV_FIELDS, BV_ROW_INDEX, EC_BIND_ACTIVE, GLOBAL_BV_PARAMS, GLOBAL_BV_PARAMS_COUNT,
-    GLOBAL_FIELDS, GLOBAL_KS, IS_BV, IS_P2, P2_INPUTS_PREFIX_SEL, P2_INPUTS_PREFIX_SEL_COUNT,
-    P2_K_SEL, P2_PERM_ID, P2_ROUND, P2_VOTE_ID_PRE_SEL, P2_VOTE_ID_PRE_SEL_COUNT, PHASE,
-    TRACE_WIDTH,
+    BV_FIELDS, BV_ROW_INDEX, EC_BIND_ACTIVE, GLOBAL_FIELDS, GLOBAL_KS, IS_BV, IS_P2, P2_K_SEL,
+    P2_PERM_ID, P2_ROUND, P2_VOTE_ID_PRE_SEL, P2_VOTE_ID_PRE_SEL_COUNT, PHASE, TRACE_WIDTH,
 };
 use davinci_stark::config::{make_prover_config, make_verifier_config};
 use davinci_stark::trace::{BallotInputs, BallotMode, generate_full_ballot_trace};
@@ -102,26 +102,6 @@ fn replace_bv_rows(
     base
 }
 
-fn replace_bv_rows_preserving_statement(
-    mut base: p3_matrix::dense::RowMajorMatrix<Goldilocks>,
-    donor: &p3_matrix::dense::RowMajorMatrix<Goldilocks>,
-    preserve_start_col: usize,
-) -> p3_matrix::dense::RowMajorMatrix<Goldilocks> {
-    assert_eq!(base.height(), donor.height());
-    assert_eq!(base.width(), donor.width());
-    for row in 0..base.height() {
-        let row_start = row * TRACE_WIDTH;
-        if base.values[row_start + IS_BV] == Goldilocks::ONE {
-            let preserved = base.values[row_start + preserve_start_col..row_start + TRACE_WIDTH].to_vec();
-            let donor_row = &donor.values[row_start..row_start + TRACE_WIDTH];
-            base.values[row_start..row_start + TRACE_WIDTH].copy_from_slice(donor_row);
-            base.values[row_start + preserve_start_col..row_start + TRACE_WIDTH]
-                .copy_from_slice(&preserved);
-        }
-    }
-    base
-}
-
 fn replace_poseidon_permutations(
     mut base: p3_matrix::dense::RowMajorMatrix<Goldilocks>,
     donor: &p3_matrix::dense::RowMajorMatrix<Goldilocks>,
@@ -161,36 +141,6 @@ fn replace_ec_phases(
             let donor_row = &donor.values[row_start..row_start + TRACE_WIDTH];
             base.values[row_start..row_start + TRACE_WIDTH].copy_from_slice(donor_row);
         }
-    }
-    base
-}
-
-fn replace_public_output_row(
-    mut base: p3_matrix::dense::RowMajorMatrix<Goldilocks>,
-    donor: &p3_matrix::dense::RowMajorMatrix<Goldilocks>,
-) -> p3_matrix::dense::RowMajorMatrix<Goldilocks> {
-    assert_eq!(base.height(), donor.height());
-    assert_eq!(base.width(), donor.width());
-    let row = base.height() - 1;
-    let row_start = row * TRACE_WIDTH;
-    let donor_row = &donor.values[row_start..row_start + TRACE_WIDTH];
-    base.values[row_start..row_start + TRACE_WIDTH].copy_from_slice(donor_row);
-    base
-}
-
-fn replace_global_slice(
-    mut base: p3_matrix::dense::RowMajorMatrix<Goldilocks>,
-    donor: &p3_matrix::dense::RowMajorMatrix<Goldilocks>,
-    start_col: usize,
-    count: usize,
-) -> p3_matrix::dense::RowMajorMatrix<Goldilocks> {
-    assert_eq!(base.height(), donor.height());
-    assert_eq!(base.width(), donor.width());
-    for row in 0..base.height() {
-        let row_start = row * TRACE_WIDTH;
-        let donor_slice = &donor.values[row_start + start_col..row_start + start_col + count];
-        base.values[row_start + start_col..row_start + start_col + count]
-            .copy_from_slice(donor_slice);
     }
     base
 }
@@ -530,22 +480,12 @@ fn test_packed_ballot_mode_must_decode_to_the_bv_rule_set() {
         1,
     );
 
-    let (strict_trace, strict_pv, _) = generate_full_ballot_trace(&strict_inputs);
-    let (permissive_trace, _, _) = generate_full_ballot_trace(&permissive_inputs);
-    let mixed_trace = replace_bv_rows_preserving_statement(
-        replace_global_slice(
-            strict_trace,
-            &permissive_trace,
-            GLOBAL_BV_PARAMS,
-            GLOBAL_BV_PARAMS_COUNT,
-        ),
-        &permissive_trace,
-        davinci_stark::columns::GLOBAL_PACKED_MODE,
-    );
+    let (strict_trace, _strict_pv, _) = generate_full_ballot_trace(&strict_inputs);
+    let (_permissive_trace, permissive_pv, _) = generate_full_ballot_trace(&permissive_inputs);
 
     assert_tampered_trace_rejected(
-        mixed_trace,
-        strict_pv,
+        strict_trace,
+        permissive_pv,
         "packed_ballot_mode must decode to the BV rule set",
     );
 }
@@ -652,14 +592,12 @@ fn test_inputs_hash_public_values_must_bind_to_poseidon_section() {
         9,
     );
 
-    let (strict_trace, strict_pv, _) = generate_full_ballot_trace(&strict_inputs);
-    let (altered_trace, _, _) = generate_full_ballot_trace(&altered_inputs);
-
-    let mixed_trace = replace_poseidon_permutations(strict_trace, &altered_trace, 12, 41);
+    let (strict_trace, _strict_pv, _) = generate_full_ballot_trace(&strict_inputs);
+    let (_altered_trace, altered_pv, _) = generate_full_ballot_trace(&altered_inputs);
     assert_tampered_trace_rejected(
-        mixed_trace,
-        strict_pv,
-        "inputs_hash public values must bind to the Poseidon section",
+        strict_trace,
+        altered_pv,
+        "inputs_hash public values must bind to the public preimage",
     );
 }
 
@@ -715,13 +653,11 @@ fn test_vote_id_public_value_must_bind_to_poseidon_section() {
     );
     altered_inputs.address[0] += Goldilocks::ONE;
 
-    let (strict_trace, strict_pv, _) = generate_full_ballot_trace(&inputs);
-    let (altered_trace, _, _) = generate_full_ballot_trace(&altered_inputs);
-
-    let mixed_trace = replace_poseidon_permutations(strict_trace, &altered_trace, 8, 12);
+    let (strict_trace, _strict_pv, _) = generate_full_ballot_trace(&inputs);
+    let (_altered_trace, altered_pv, _) = generate_full_ballot_trace(&altered_inputs);
     assert_tampered_trace_rejected(
-        mixed_trace,
-        strict_pv,
+        strict_trace,
+        altered_pv,
         "vote_id public value must bind to the vote-id Poseidon section",
     );
 }
@@ -770,52 +706,6 @@ fn test_vote_id_absorb_schedule_must_exist() {
     }
 
     assert_tampered_trace_rejected(trace, pv, "vote-id absorb schedule");
-}
-
-#[test]
-fn test_inputs_hash_absorb_schedule_must_exist() {
-    let inputs = base_ballot_inputs(
-        [
-            Scalar([1, 0, 0, 0, 0]),
-            Scalar([2, 0, 0, 0, 0]),
-            Scalar([3, 0, 0, 0, 0]),
-            Scalar([4, 0, 0, 0, 0]),
-            Scalar([5, 0, 0, 0, 0]),
-            Scalar([0, 0, 0, 0, 0]),
-            Scalar([0, 0, 0, 0, 0]),
-            Scalar([0, 0, 0, 0, 0]),
-        ],
-        BallotMode {
-            num_fields: 5,
-            group_size: 1,
-            unique_values: 1,
-            cost_from_weight: 0,
-            cost_exponent: 2,
-            max_value: 15,
-            min_value: 0,
-            max_value_sum: 1125,
-            min_value_sum: 5,
-        },
-        1,
-    );
-
-    let (mut trace, pv, _) = generate_full_ballot_trace(&inputs);
-    for row in 0..(trace.height() - 1) {
-        let next_row_start = (row + 1) * TRACE_WIDTH;
-        if trace.values[next_row_start + davinci_stark::columns::IS_P2] == Goldilocks::ONE
-            && trace.values[next_row_start + P2_ROUND] == Goldilocks::ZERO
-        {
-            let perm_id = trace.values[next_row_start + P2_PERM_ID].as_canonical_u64();
-            if (12..(12 + P2_INPUTS_PREFIX_SEL_COUNT as u64)).contains(&perm_id) {
-                let row_start = row * TRACE_WIDTH;
-                for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
-                    trace.values[row_start + P2_INPUTS_PREFIX_SEL + i] = Goldilocks::ZERO;
-                }
-            }
-        }
-    }
-
-    assert_tampered_trace_rejected(trace, pv, "inputs-hash absorb schedule");
 }
 
 #[test]
@@ -983,12 +873,9 @@ fn test_ciphertexts_must_bind_to_ec_phase_outputs() {
     altered_inputs.pk = Point::mulgen(other_sk);
 
     let (strict_trace, _strict_pv, _) = generate_full_ballot_trace(&inputs);
-    let (altered_trace, altered_pv, _) = generate_full_ballot_trace(&altered_inputs);
-
-    let mixed_trace =
-        replace_public_output_row(replace_poseidon_permutations(strict_trace, &altered_trace, 12, 41), &altered_trace);
+    let (_altered_trace, altered_pv, _) = generate_full_ballot_trace(&altered_inputs);
     assert_tampered_trace_rejected(
-        mixed_trace,
+        strict_trace,
         altered_pv,
         "ciphertexts hashed into inputs_hash must bind to the EC phase outputs",
     );
@@ -1682,5 +1569,42 @@ fn test_circom_style_full_ballot_proof() {
         &proof.public_values[davinci_stark::air::PV_ADDRESS
             ..davinci_stark::air::PV_ADDRESS + 4],
         &inputs.address
+    );
+}
+
+#[test]
+fn test_inputs_hash_must_match_the_public_preimage() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([4, 0, 0, 0, 0]),
+            Scalar([5, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 5,
+            group_size: 1,
+            unique_values: 1,
+            cost_from_weight: 0,
+            cost_exponent: 2,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 1125,
+            min_value_sum: 5,
+        },
+        1,
+    );
+
+    let (mut proof, _) = davinci_stark::prove_full_ballot(&inputs);
+    proof.public_values[PV_INPUTS_PREIMAGE + 33] =
+        proof.public_values[PV_INPUTS_PREIMAGE + 33] + Goldilocks::ONE;
+
+    assert!(
+        davinci_stark::verify_ballot(&proof).is_err(),
+        "verifier must reject proofs whose public inputs-hash preimage is tampered",
     );
 }

@@ -34,9 +34,14 @@ pub const P2_ROUNDS_PER_PERM: usize = poseidon2::TOTAL_ROUNDS;
 
 // -- Public values layout --
 // These indices define where each public value lives in the PV vector.
-// The layout matches the Circom circuit: {inputs_hash, address, vote_id}.
-// The inputs_hash is a Poseidon2 sponge that covers everything sensitive,
-// so exposing just these 9 values reveals nothing about private inputs.
+// Public values expose the verifier-visible statement:
+//   - inputs_hash (4)
+//   - address (4)
+//   - vote_id (1)
+//   - full inputs_hash preimage (114)
+//
+// The STARK binds the preimage values to the witness, and the verifier
+// recomputes inputs_hash externally from that public preimage.
 
 /// Start index for the 4-element inputs hash in the public values vector.
 pub const PV_INPUTS_HASH: usize = 0;
@@ -44,8 +49,11 @@ pub const PV_INPUTS_HASH: usize = 0;
 pub const PV_ADDRESS: usize = 4;
 /// Index of the single vote_id element.
 pub const PV_VOTE_ID: usize = 8;
+/// Start index for the 114-element inputs-hash preimage.
+pub const PV_INPUTS_PREIMAGE: usize = 9;
+pub const PV_INPUTS_PREIMAGE_COUNT: usize = 114;
 /// Total number of public value elements.
-pub const PV_COUNT: usize = 9;
+pub const PV_COUNT: usize = PV_INPUTS_PREIMAGE + PV_INPUTS_PREIMAGE_COUNT;
 
 /// BallotAir holds the Poseidon2 round constants that the constraint evaluator
 /// needs. These must match exactly what the trace generator used (the upstream
@@ -107,7 +115,7 @@ where
         // EC constraints: only fire when IS_EC = 1.
         // Covers doubling, addition, multiplexer, and bit validity.
         // ============================================================
-        eval_ec_constraints::<AB>(builder, &local, &next, &is_ec);
+        eval_ec_constraints::<AB>(builder, &local, &next, &is_ec, &public_values);
 
         // ============================================================
         // Poseidon2 constraints: only fire when IS_P2 = 1.
@@ -120,24 +128,10 @@ where
         // Range checks, uniqueness, power computation, cost bounds.
         // ============================================================
         eval_bv_constraints::<AB>(builder, &local, &next, &is_bv);
-        eval_c2_binding_constraints::<AB>(builder, &local, &next);
-        eval_packed_mode_rows::<AB>(builder, &local, &next);
+        eval_c2_binding_constraints::<AB>(builder, &local, &next, &public_values);
+        eval_packed_mode_rows::<AB>(builder, &local, &next, &public_values);
         eval_global_bindings::<AB>(builder, &local, &next);
         eval_poseidon_statement_bindings::<AB>(builder, &local, &next, &public_values);
-
-        let inputs_hash_out: AB::Expr = local[P2_INPUTS_HASH_OUT].clone().into();
-        builder.assert_zero(inputs_hash_out.clone() * (inputs_hash_out.clone() - AB::Expr::ONE));
-        builder.assert_zero(inputs_hash_out.clone() * is_ec.clone());
-        builder.assert_zero(inputs_hash_out.clone() * is_p2.clone());
-        builder.assert_zero(inputs_hash_out.clone() * is_bv.clone());
-        builder.assert_zero(inputs_hash_out.clone() * (AB::Expr::ONE - next[IS_BV].clone().into()));
-        for i in 0..4 {
-            builder.assert_zero(
-                inputs_hash_out.clone()
-                    * (local[P2_STATE + i].clone().into()
-                        - public_values[PV_INPUTS_HASH + i].clone().into()),
-            );
-        }
 
         // ============================================================
         // First-row boundary: the accumulator starts at the neutral point.
@@ -189,11 +183,12 @@ where
 ///
 /// All constraints are multiplied by `gate` so they evaluate to zero on
 /// non-EC rows regardless of what data is in those columns.
-fn eval_ec_constraints<AB: AirBuilder>(
+fn eval_ec_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
     gate: &AB::Expr,
+    public_values: &[AB::PublicVar],
 ) {
     let acc_x: [AB::Expr; 5] = gfp5_expr::<AB>(local, ACC_X);
     let acc_z: [AB::Expr; 5] = gfp5_expr::<AB>(local, ACC_Z);
@@ -252,10 +247,11 @@ fn eval_ec_constraints<AB: AirBuilder>(
     let global_fields: Vec<AB::Expr> = (0..GLOBAL_FIELDS_COUNT)
         .map(|i| local[GLOBAL_FIELDS + i].clone().into())
         .collect();
-    let global_pk_x: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK);
-    let global_pk_z: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK + 5);
-    let global_pk_u: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK + 10);
-    let global_pk_t: [AB::Expr; 5] = gfp5_expr::<AB>(local, GLOBAL_PK + 15);
+    let public_preimage = |idx: usize| public_values[PV_INPUTS_PREIMAGE + idx].clone().into();
+    let public_pk_x: [AB::Expr; 5] = core::array::from_fn(|i| public_preimage(8 + i));
+    let public_pk_z: [AB::Expr; 5] = core::array::from_fn(|i| public_preimage(13 + i));
+    let public_pk_u: [AB::Expr; 5] = core::array::from_fn(|i| public_preimage(18 + i));
+    let public_pk_t: [AB::Expr; 5] = core::array::from_fn(|i| public_preimage(23 + i));
 
     let next_acc_x: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_X);
     let next_acc_z: [AB::Expr; 5] = gfp5_expr::<AB>(next, ACC_Z);
@@ -361,16 +357,16 @@ fn eval_ec_constraints<AB: AirBuilder>(
             gate.clone() * is_generator_phase.clone() * (base_t[i].clone() - gen_t[i].clone()),
         );
         builder.assert_zero(
-            gate.clone() * pk_phase_sel.clone() * (base_x[i].clone() - global_pk_x[i].clone()),
+            gate.clone() * pk_phase_sel.clone() * (base_x[i].clone() - public_pk_x[i].clone()),
         );
         builder.assert_zero(
-            gate.clone() * pk_phase_sel.clone() * (base_z[i].clone() - global_pk_z[i].clone()),
+            gate.clone() * pk_phase_sel.clone() * (base_z[i].clone() - public_pk_z[i].clone()),
         );
         builder.assert_zero(
-            gate.clone() * pk_phase_sel.clone() * (base_u[i].clone() - global_pk_u[i].clone()),
+            gate.clone() * pk_phase_sel.clone() * (base_u[i].clone() - public_pk_u[i].clone()),
         );
         builder.assert_zero(
-            gate.clone() * pk_phase_sel.clone() * (base_t[i].clone() - global_pk_t[i].clone()),
+            gate.clone() * pk_phase_sel.clone() * (base_t[i].clone() - public_pk_t[i].clone()),
         );
     }
     builder.assert_zero(
@@ -396,7 +392,7 @@ fn eval_ec_constraints<AB: AirBuilder>(
     for i in 0..NUM_FIELDS {
         for j in 0..5 {
             expected_c1_enc[j] = expected_c1_enc[j].clone()
-                + c1_phase_sel[i].clone() * local[GLOBAL_C1_ENC + i * 5 + j].clone().into();
+                + c1_phase_sel[i].clone() * public_preimage(33 + i * 10 + j);
         }
     }
 
@@ -789,7 +785,12 @@ fn eval_ec_constraints<AB: AirBuilder>(
     }
 }
 
-fn eval_c2_binding_constraints<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], next: &[AB::Var]) {
+fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
+    builder: &mut AB,
+    local: &[AB::Var],
+    next: &[AB::Var],
+    public_values: &[AB::PublicVar],
+) {
     let bind_gate =
         (AB::Expr::ONE - local[IS_EC].clone().into() - local[IS_P2].clone().into() - local[IS_BV].clone().into())
             * local[EC_BIND_ACTIVE].clone().into();
@@ -829,12 +830,13 @@ fn eval_c2_binding_constraints<AB: AirBuilder>(builder: &mut AB, local: &[AB::Va
     let add_at10 = gfp5_expr::<AB>(local, ADD_AT10);
     let add_u_pre = gfp5_expr::<AB>(local, ADD_U_PRE);
     let c2_enc = gfp5_expr::<AB>(local, C2_BIND_ENC);
+    let public_preimage = |idx: usize| public_values[PV_INPUTS_PREIMAGE + idx].clone().into();
 
     let mut expected_c2_enc: [AB::Expr; 5] = core::array::from_fn(|_| AB::Expr::ZERO);
     for field_idx in 0..NUM_FIELDS {
         for limb in 0..5 {
             expected_c2_enc[limb] = expected_c2_enc[limb].clone()
-                + field_sel[field_idx].clone() * local[GLOBAL_C2_ENC + field_idx * 5 + limb].clone().into();
+                + field_sel[field_idx].clone() * public_preimage(33 + field_idx * 10 + 5 + limb);
         }
     }
 
@@ -967,7 +969,13 @@ fn eval_c2_binding_constraints<AB: AirBuilder>(builder: &mut AB, local: &[AB::Va
     }
 }
 
-fn eval_packed_mode_rows<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], next: &[AB::Var]) {
+fn eval_packed_mode_rows<AB: AirBuilder + AirBuilderWithPublicValues>(
+    builder: &mut AB,
+    local: &[AB::Var],
+    next: &[AB::Var],
+    public_values: &[AB::PublicVar],
+) {
+    let public_preimage = |idx: usize| public_values[PV_INPUTS_PREIMAGE + idx].clone().into();
     let current_gap =
         AB::Expr::ONE - local[IS_EC].clone().into() - local[IS_P2].clone().into() - local[IS_BV].clone().into();
     let next_is_p2: AB::Expr = next[IS_P2].clone().into();
@@ -1011,7 +1019,7 @@ fn eval_packed_mode_rows<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], ne
             chunk_value = chunk_value + pow2.clone() * local[P2_VOTE_ID_BITS + bit].clone().into();
             pow2 = pow2 * AB::Expr::from_u64(2);
         }
-        builder.assert_zero(gate.clone() * (local[GLOBAL_PACKED_MODE + chunk].clone().into() - chunk_value));
+        builder.assert_zero(gate.clone() * (public_preimage(4 + chunk) - chunk_value));
     }
 
     let chunk0 = mode_gate(0);
@@ -1131,9 +1139,6 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
         .collect();
     let vote_selectors: Vec<AB::Expr> = (0..P2_VOTE_ID_PRE_SEL_COUNT)
         .map(|i| local[P2_VOTE_ID_PRE_SEL + i].clone().into())
-        .collect();
-    let input_selectors: Vec<AB::Expr> = (0..P2_INPUTS_PREFIX_SEL_COUNT)
-        .map(|i| local[P2_INPUTS_PREFIX_SEL + i].clone().into())
         .collect();
 
     let mut selector_sum = AB::Expr::ZERO;
@@ -1297,9 +1302,6 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
         let next_vote_selectors: Vec<AB::Expr> = (0..P2_VOTE_ID_PRE_SEL_COUNT)
             .map(|i| next[P2_VOTE_ID_PRE_SEL + i].clone().into())
             .collect();
-        let next_input_selectors: Vec<AB::Expr> = (0..P2_INPUTS_PREFIX_SEL_COUNT)
-            .map(|i| next[P2_INPUTS_PREFIX_SEL + i].clone().into())
-            .collect();
         let both_p2 = gate.clone() * next_is_p2.clone();
 
         for i in 0..poseidon2::WIDTH {
@@ -1323,11 +1325,6 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
         for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
             when_trans.assert_zero(
                 both_p2.clone() * (next_vote_selectors[i].clone() - vote_selectors[i].clone()),
-            );
-        }
-        for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
-            when_trans.assert_zero(
-                both_p2.clone() * (next_input_selectors[i].clone() - input_selectors[i].clone()),
             );
         }
     }
@@ -1359,19 +1356,10 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
         }
 
         let mut expected_next_vote = vec![AB::Expr::ZERO; P2_VOTE_ID_PRE_SEL_COUNT];
-        let mut expected_next_input = vec![AB::Expr::ZERO; P2_INPUTS_PREFIX_SEL_COUNT];
         expected_next_vote[0] = k_selectors[7].clone();
         for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
             if i + 1 < P2_VOTE_ID_PRE_SEL_COUNT {
                 expected_next_vote[i + 1] = expected_next_vote[i + 1].clone() + vote_selectors[i].clone();
-            } else {
-                expected_next_input[0] = expected_next_input[0].clone() + vote_selectors[i].clone();
-            }
-        }
-        for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
-            if i + 1 < P2_INPUTS_PREFIX_SEL_COUNT {
-                expected_next_input[i + 1] =
-                    expected_next_input[i + 1].clone() + input_selectors[i].clone();
             }
         }
 
@@ -1381,22 +1369,10 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
                     * (next[P2_VOTE_ID_PRE_SEL + i].clone().into() - expected_next_vote[i].clone()),
             );
         }
-        for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
-            when_trans.assert_zero(
-                local_to_gap.clone()
-                    * (next[P2_INPUTS_PREFIX_SEL + i].clone().into()
-                        - expected_next_input[i].clone()),
-            );
-        }
         when_trans.assert_zero(
             local_to_gap.clone()
                 * (next[P2_VOTE_ID_OUT].clone().into()
                     - vote_selectors[P2_VOTE_ID_PRE_SEL_COUNT - 1].clone()),
-        );
-        when_trans.assert_zero(
-            local_to_gap
-                * (next[P2_INPUTS_HASH_OUT].clone().into()
-                    - input_selectors[P2_INPUTS_PREFIX_SEL_COUNT - 1].clone()),
         );
     }
 }
@@ -1421,35 +1397,9 @@ fn eval_global_bindings<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], nex
             next[GLOBAL_BV_PARAMS + i].clone().into() - local[GLOBAL_BV_PARAMS + i].clone().into(),
         );
     }
-    for i in 0..GLOBAL_PACKED_MODE_COUNT {
-        when_trans.assert_zero(
-            next[GLOBAL_PACKED_MODE + i].clone().into()
-                - local[GLOBAL_PACKED_MODE + i].clone().into(),
-        );
-    }
-    for i in 0..GLOBAL_PROCESS_ID_COUNT {
-        when_trans.assert_zero(
-            next[GLOBAL_PROCESS_ID + i].clone().into()
-                - local[GLOBAL_PROCESS_ID + i].clone().into(),
-        );
-    }
     for i in 0..GLOBAL_K_LIMBS_COUNT {
         when_trans.assert_zero(
             next[GLOBAL_K_LIMBS + i].clone().into() - local[GLOBAL_K_LIMBS + i].clone().into(),
-        );
-    }
-    for i in 0..GLOBAL_PK_COUNT {
-        when_trans
-            .assert_zero(next[GLOBAL_PK + i].clone().into() - local[GLOBAL_PK + i].clone().into());
-    }
-    for i in 0..GLOBAL_C1_ENC_COUNT {
-        when_trans.assert_zero(
-            next[GLOBAL_C1_ENC + i].clone().into() - local[GLOBAL_C1_ENC + i].clone().into(),
-        );
-    }
-    for i in 0..GLOBAL_C2_ENC_COUNT {
-        when_trans.assert_zero(
-            next[GLOBAL_C2_ENC + i].clone().into() - local[GLOBAL_C2_ENC + i].clone().into(),
         );
     }
     let current_gap = AB::Expr::ONE - is_ec.clone() - is_p2.clone() - is_bv.clone();
@@ -1489,6 +1439,7 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
 ) {
     let col = |c: usize| -> AB::Expr { local[c].clone().into() };
     let ncol = |c: usize| -> AB::Expr { next[c].clone().into() };
+    let public_preimage = |idx: usize| public_values[PV_INPUTS_PREIMAGE + idx].clone().into();
     let mat4 = |a: &AB::Expr, b: &AB::Expr, c: &AB::Expr, d: &AB::Expr| -> [AB::Expr; 4] {
         let t0 = a.clone() + b.clone();
         let t1 = c.clone() + d.clone();
@@ -1502,28 +1453,6 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
         let t7 = t2 + t4.clone();
         [t6, t5, t7, t4]
     };
-    let hash_input_expr = |idx: usize| -> AB::Expr {
-        match idx {
-            0..=3 => col(GLOBAL_PROCESS_ID + idx),
-            4..=7 => col(GLOBAL_PACKED_MODE + (idx - 4)),
-            8..=27 => col(GLOBAL_PK + (idx - 8)),
-            28..=31 => public_values[PV_ADDRESS + (idx - 28)].clone().into(),
-            32 => public_values[PV_VOTE_ID].clone().into(),
-            33..=112 => {
-                let rel = idx - 33;
-                let field = rel / 10;
-                let limb = rel % 10;
-                if limb < 5 {
-                    col(GLOBAL_C1_ENC + field * 5 + limb)
-                } else {
-                    col(GLOBAL_C2_ENC + field * 5 + (limb - 5))
-                }
-            }
-            113 => col(GLOBAL_BV_WEIGHT),
-            _ => AB::Expr::ZERO,
-        }
-    };
-
     for k_idx in 0..P2_K_SEL_COUNT {
         let gate = col(IS_P2) * col(P2_ROUND_SEL) * col(P2_K_SEL + k_idx);
         let mut input = [
@@ -1580,14 +1509,11 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
     let vote_sel: Vec<AB::Expr> = (0..P2_VOTE_ID_PRE_SEL_COUNT)
         .map(|i| col(P2_VOTE_ID_PRE_SEL + i))
         .collect();
-    let inputs_sel: Vec<AB::Expr> = (0..P2_INPUTS_PREFIX_SEL_COUNT)
-        .map(|i| col(P2_INPUTS_PREFIX_SEL + i))
-        .collect();
     let current_gap = AB::Expr::ONE - col(IS_EC) - col(IS_P2) - col(IS_BV);
     let plain_gap = current_gap.clone() - current_gap.clone() * col(EC_BIND_ACTIVE);
     let preperm_gate = plain_gap * ncol(IS_P2) * (AB::Expr::ONE - ncol(P2_ROUND));
     let mut active = AB::Expr::ZERO;
-    for sel in vote_sel.iter().chain(inputs_sel.iter()) {
+    for sel in &vote_sel {
         builder.assert_zero(sel.clone() * (sel.clone() - AB::Expr::ONE));
         active = active + sel.clone();
     }
@@ -1595,19 +1521,13 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
     for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
         builder.assert_zero(preperm_gate.clone() * (ncol(P2_VOTE_ID_PRE_SEL + i) - vote_sel[i].clone()));
     }
-    for i in 0..P2_INPUTS_PREFIX_SEL_COUNT {
-        builder.assert_zero(
-            preperm_gate.clone() * (ncol(P2_INPUTS_PREFIX_SEL + i) - inputs_sel[i].clone()),
-        );
-    }
     builder.assert_zero(preperm_gate.clone() * (ncol(P2_PERM_ID) - col(P2_PERM_ID) - AB::Expr::ONE));
-    builder.assert_zero(preperm_gate.clone() * ncol(P2_INPUTS_HASH_OUT));
     builder.assert_zero(preperm_gate.clone() * ncol(P2_VOTE_ID_OUT));
 
     let mut expected_chunk = [AB::Expr::ZERO, AB::Expr::ZERO, AB::Expr::ZERO, AB::Expr::ZERO];
     for i in 0..4 {
         expected_chunk[i] = expected_chunk[i].clone()
-            + vote_sel[0].clone() * col(GLOBAL_PROCESS_ID + i)
+            + vote_sel[0].clone() * public_preimage(i)
             + vote_sel[1].clone() * public_values[PV_ADDRESS + i].clone().into()
             ;
     }
@@ -1615,17 +1535,11 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
         expected_chunk[i] = expected_chunk[i].clone() + vote_sel[2].clone() * col(GLOBAL_K_LIMBS + i);
     }
     expected_chunk[0] = expected_chunk[0].clone() + vote_sel[3].clone() * col(GLOBAL_K_LIMBS + 4);
-    for chunk_idx in 0..P2_INPUTS_PREFIX_SEL_COUNT {
-        for i in 0..4 {
-            expected_chunk[i] = expected_chunk[i].clone()
-                + inputs_sel[chunk_idx].clone() * hash_input_expr(chunk_idx * 4 + i);
-        }
-    }
     for i in 0..4 {
         builder.assert_zero(preperm_gate.clone() * active.clone() * (col(P2_ABSORB_CHUNK + i) - expected_chunk[i].clone()));
     }
 
-    let first_hash = vote_sel[0].clone() + inputs_sel[0].clone();
+    let first_hash = vote_sel[0].clone();
     let continuing = active.clone() - first_hash.clone();
     let mut absorbed = [
         AB::Expr::ZERO,

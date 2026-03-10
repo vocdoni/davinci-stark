@@ -22,6 +22,7 @@ pub mod wasm;
 use air::BallotAir;
 use config::{BallotConfig, make_prover_config, make_verifier_config};
 use p3_goldilocks::Goldilocks;
+use poseidon2::{Poseidon2Constants, poseidon2_hash};
 use p3_uni_stark::{Proof, prove, verify};
 use trace::{BallotInputs, BallotOutputs, generate_full_ballot_trace};
 
@@ -55,7 +56,7 @@ pub fn prove_full_ballot(inputs: &BallotInputs) -> (BallotProof, BallotOutputs) 
 ///
 /// Reconstructs the STARK config (deterministic, same as the prover), then
 /// runs the Plonky3 verifier. Returns Ok(()) if the proof is valid.
-pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), impl core::fmt::Debug> {
+pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), String> {
     let config = make_verifier_config();
     let air = BallotAir::new();
     verify(
@@ -64,4 +65,27 @@ pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), impl core::fmt::D
         &ballot_proof.proof,
         &ballot_proof.public_values,
     )
+    .map_err(|err| format!("{err:?}"))?;
+
+    let pv = &ballot_proof.public_values;
+    if pv.len() != air::PV_COUNT {
+        return Err(format!(
+            "invalid public-value length: expected {}, got {}",
+            air::PV_COUNT,
+            pv.len()
+        ));
+    }
+
+    let preimage = &pv[air::PV_INPUTS_PREIMAGE..air::PV_INPUTS_PREIMAGE + air::PV_INPUTS_PREIMAGE_COUNT];
+    let expected_hash = poseidon2_hash(preimage, 4, &Poseidon2Constants::new());
+    if expected_hash.as_slice() != &pv[air::PV_INPUTS_HASH..air::PV_INPUTS_HASH + 4] {
+        return Err("inputs_hash does not match the public preimage".to_string());
+    }
+    if preimage[28..32] != pv[air::PV_ADDRESS..air::PV_ADDRESS + 4] {
+        return Err("address does not match the public preimage".to_string());
+    }
+    if preimage[32] != pv[air::PV_VOTE_ID] {
+        return Err("vote_id does not match the public preimage".to_string());
+    }
+    Ok(())
 }

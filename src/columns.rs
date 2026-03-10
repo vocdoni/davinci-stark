@@ -3,7 +3,7 @@
 //! The trace is a flat matrix where each row contains all the data for one step
 //! of computation. The columns are laid out so that EC scalar mul data and
 //! Poseidon2 hash data can share physical columns (they never run in the same
-//! row), while selectors and hidden linkage columns expand the full row width to 1,581.
+//! row), while selectors and hidden linkage columns expand the full row width to 379.
 //!
 //! This file just defines named constants for column offsets. The actual
 //! constraint logic that reads these columns lives in air.rs.
@@ -163,32 +163,19 @@ pub const GLOBAL_BV_MAX_SUM: usize = GLOBAL_BV_PARAMS + 6;
 pub const GLOBAL_BV_MIN_SUM: usize = GLOBAL_BV_PARAMS + 7;
 pub const GLOBAL_BV_GROUP_SIZE: usize = GLOBAL_BV_PARAMS + 8;
 pub const GLOBAL_BV_WEIGHT: usize = GLOBAL_BV_PARAMS + 9;
-pub const GLOBAL_PACKED_MODE: usize = GLOBAL_BV_PARAMS + GLOBAL_BV_PARAMS_COUNT; // 273
-pub const GLOBAL_PACKED_MODE_COUNT: usize = 4;
-pub const GLOBAL_PROCESS_ID: usize = GLOBAL_PACKED_MODE + GLOBAL_PACKED_MODE_COUNT; // 277
-pub const GLOBAL_PROCESS_ID_COUNT: usize = 4;
-pub const GLOBAL_K_LIMBS: usize = GLOBAL_PROCESS_ID + GLOBAL_PROCESS_ID_COUNT; // 281
+pub const GLOBAL_K_LIMBS: usize = GLOBAL_BV_PARAMS + GLOBAL_BV_PARAMS_COUNT; // 273
 pub const GLOBAL_K_LIMBS_COUNT: usize = 5;
-pub const GLOBAL_PK: usize = GLOBAL_K_LIMBS + GLOBAL_K_LIMBS_COUNT; // 286
-pub const GLOBAL_PK_COUNT: usize = 20;
-pub const CURRENT_S: usize = GLOBAL_PK + GLOBAL_PK_COUNT; // 306
+pub const CURRENT_S: usize = GLOBAL_K_LIMBS + GLOBAL_K_LIMBS_COUNT; // 278
 pub const CURRENT_S_COUNT: usize = 20;
-pub const GLOBAL_C1_ENC: usize = CURRENT_S + CURRENT_S_COUNT; // 326
-pub const GLOBAL_C1_ENC_COUNT: usize = 8 * 5;
-pub const GLOBAL_C2_ENC: usize = GLOBAL_C1_ENC + GLOBAL_C1_ENC_COUNT; // 366
-pub const GLOBAL_C2_ENC_COUNT: usize = 8 * 5;
 /// Selectors for the first 8 Poseidon permutations (the k-derivation chain).
-pub const P2_K_SEL: usize = GLOBAL_C2_ENC + GLOBAL_C2_ENC_COUNT; // 406
+pub const P2_K_SEL: usize = CURRENT_S + CURRENT_S_COUNT; // 298
 pub const P2_K_SEL_COUNT: usize = 8;
-pub const P2_INPUTS_HASH_OUT: usize = P2_K_SEL + P2_K_SEL_COUNT; // 414
-pub const P2_VOTE_ID_OUT: usize = P2_INPUTS_HASH_OUT + 1; // 415
-pub const P2_ABSORB_CHUNK: usize = P2_VOTE_ID_OUT + 1; // 416
+pub const P2_VOTE_ID_OUT: usize = P2_K_SEL + P2_K_SEL_COUNT; // 306
+pub const P2_ABSORB_CHUNK: usize = P2_VOTE_ID_OUT + 1; // 307
 pub const P2_ABSORB_CHUNK_COUNT: usize = 4;
-pub const P2_VOTE_ID_PRE_SEL: usize = P2_ABSORB_CHUNK + P2_ABSORB_CHUNK_COUNT; // 420
+pub const P2_VOTE_ID_PRE_SEL: usize = P2_ABSORB_CHUNK + P2_ABSORB_CHUNK_COUNT; // 311
 pub const P2_VOTE_ID_PRE_SEL_COUNT: usize = 4;
-pub const P2_INPUTS_PREFIX_SEL: usize = P2_VOTE_ID_PRE_SEL + P2_VOTE_ID_PRE_SEL_COUNT; // 424
-pub const P2_INPUTS_PREFIX_SEL_COUNT: usize = 29;
-pub const P2_VOTE_ID_BITS: usize = P2_INPUTS_PREFIX_SEL + P2_INPUTS_PREFIX_SEL_COUNT; // 453
+pub const P2_VOTE_ID_BITS: usize = P2_VOTE_ID_PRE_SEL + P2_VOTE_ID_PRE_SEL_COUNT; // 315
 pub const P2_VOTE_ID_BITS_COUNT: usize = 64;
 
 // ==========================================================================
@@ -365,7 +352,7 @@ pub const BV_ACC_INTER_COUNT: usize = 7; // columns 159..165
 // Public-output row columns (active on the dedicated final binding row)
 // ==========================================================================
 
-/// Dedicated output row storage for the 9 public values.
+/// Dedicated output row storage for the 123 public values.
 /// This row has all section flags set to 0, so these columns do not overlap
 /// with any active constraints from EC, Poseidon2, or ballot validation.
 pub const PUB_OUTPUTS: usize = 0;
@@ -375,7 +362,7 @@ pub const PUB_OUTPUTS: usize = 0;
 // ==========================================================================
 
 /// Total trace width including section flags and selector bits.
-pub const TRACE_WIDTH: usize = P2_VOTE_ID_BITS + P2_VOTE_ID_BITS_COUNT; // 517
+pub const TRACE_WIDTH: usize = P2_VOTE_ID_BITS + P2_VOTE_ID_BITS_COUNT; // 379
 
 // ==========================================================================
 // Helpers
