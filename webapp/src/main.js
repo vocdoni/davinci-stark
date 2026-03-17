@@ -4,7 +4,13 @@
 // proof generation does not freeze the browser. All WASM calls go through
 // the call() helper which returns a promise resolved when the worker replies.
 
-import { normalizeChoices, packBallotMode } from './ballot_config.js';
+import {
+  encodeGoldilocks4Le,
+  encodeU64LeChecked,
+  normalizeChoices,
+  packBallotMode,
+  parseBigIntValue,
+} from './ballot_config.js';
 import { bytesToHex, formatBuildCommit, formatProofPreview, summarizeTimings } from './proof_ui.js';
 import { buildInfoText } from './build_info.js';
 
@@ -77,21 +83,6 @@ function hexToBytes(hex) {
   return bytes;
 }
 
-// Encode a JS number as 8 bytes in little-endian u64 format.
-function u64ToLeBytes(val) {
-  const buf = new ArrayBuffer(8);
-  const view = new DataView(buf);
-  view.setBigUint64(0, BigInt(val), true);
-  return new Uint8Array(buf);
-}
-
-// Parse a user-entered numeric string (supports 0x prefix for hex).
-function parseInputValue(str) {
-  str = str.trim();
-  if (str.startsWith('0x') || str.startsWith('0X')) return BigInt(str);
-  return BigInt(str);
-}
-
 // Auto-generate random K (32 random bytes as hex)
 window.genRandomK = function() {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -107,7 +98,7 @@ window.doProve = async function() {
     const choicesStr = document.getElementById('vote_choices').value;
     const { choices, numFields } = normalizeChoices(choicesStr);
 
-    const weight = parseInt(document.getElementById('weight').value) || 1;
+    const weight = parseBigIntValue(document.getElementById('weight').value || '1');
     const processIdStr = document.getElementById('process_id').value;
     const addressStr = document.getElementById('address').value;
     const skHex = document.getElementById('sk').value;
@@ -122,14 +113,14 @@ window.doProve = async function() {
     // Read ballot config
     const config = {
       numFields,
-      groupSize: parseInt(document.getElementById('group_size').value) || 1,
-      uniqueValues: parseInt(document.getElementById('unique_values').value) || 0,
-      costFromWeight: parseInt(document.getElementById('cost_from_weight').value) || 0,
-      costExponent: parseInt(document.getElementById('cost_exponent').value) || 2,
-      maxValue: parseInt(document.getElementById('max_value').value) || 16,
-      minValue: parseInt(document.getElementById('min_value').value) || 0,
-      maxValueSum: parseInt(document.getElementById('max_value_sum').value) || 1125,
-      minValueSum: parseInt(document.getElementById('min_value_sum').value) || 5,
+      groupSize: parseBigIntValue(document.getElementById('group_size').value || '1'),
+      uniqueValues: parseBigIntValue(document.getElementById('unique_values').value || '0'),
+      costFromWeight: parseBigIntValue(document.getElementById('cost_from_weight').value || '0'),
+      costExponent: parseBigIntValue(document.getElementById('cost_exponent').value || '2'),
+      maxValue: parseBigIntValue(document.getElementById('max_value').value || '16'),
+      minValue: parseBigIntValue(document.getElementById('min_value').value || '0'),
+      maxValueSum: parseBigIntValue(document.getElementById('max_value_sum').value || '1125'),
+      minValueSum: parseBigIntValue(document.getElementById('min_value_sum').value || '5'),
     };
 
     log('\n--- Generating Keys ---', 'info');
@@ -147,25 +138,20 @@ window.doProve = async function() {
     const kBytes = hexToBytes(kHex);
     const fields = new Uint8Array(8 * 8);
     for (let i = 0; i < 8; i++) {
-      fields.set(u64ToLeBytes(choices[i] || 0), i * 8);
+      fields.set(encodeU64LeChecked(choices[i] ?? 0n), i * 8);
     }
 
-    const processId = new Uint8Array(32);
-    const pidVal = parseInputValue(processIdStr);
-    processId.set(u64ToLeBytes(pidVal), 0);
+    const processId = encodeGoldilocks4Le(parseBigIntValue(processIdStr));
+    const address = encodeGoldilocks4Le(parseBigIntValue(addressStr));
 
-    const address = new Uint8Array(32);
-    const addrVal = parseInputValue(addressStr);
-    address.set(u64ToLeBytes(addrVal), 0);
-
-    const weightBytes = u64ToLeBytes(weight);
+    const weightBytes = encodeU64LeChecked(weight);
     const ballotMode = packBallotMode(config);
     const inputPackMs = performance.now() - packStart;
 
     log('\n--- Full Ballot Proof ---', 'info');
-    log(`Choices: [${choices.slice(0, config.numFields).join(', ')}]`);
-    log(`Weight: ${weight} | Process: ${processIdStr} | Address: ${addressStr}`);
-    log(`Config: unique=${config.uniqueValues} max=${config.maxValue} min=${config.minValue} exp=${config.costExponent}`);
+    log(`Choices: [${choices.slice(0, numFields).map(String).join(', ')}]`);
+    log(`Weight: ${weight.toString()} | Process: ${processIdStr} | Address: ${addressStr}`);
+    log(`Config: unique=${config.uniqueValues.toString()} max=${config.maxValue.toString()} min=${config.minValue.toString()} exp=${config.costExponent.toString()}`);
     log('Proving in Web Worker... (UI stays responsive)', 'info');
 
     document.getElementById('btn-prove').disabled = true;

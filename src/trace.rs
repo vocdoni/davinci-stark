@@ -485,14 +485,7 @@ pub fn generate_full_ballot_trace(
             }
         }
         annotate_poseidon_preperm_row(&mut values, p2_row - 1, &chunk, Some(idx));
-        p2_row = fill_poseidon2_rows(
-            &mut values,
-            trace,
-            &constants,
-            perm_id,
-            p2_row,
-            Some(idx),
-        );
+        p2_row = fill_poseidon2_rows(&mut values, trace, &constants, perm_id, p2_row, Some(idx));
         perm_id += 1;
     }
     values[(p2_row - 1) * TRACE_WIDTH + P2_VOTE_ID_OUT] = Goldilocks::ONE;
@@ -839,7 +832,14 @@ pub fn generate_poseidon2_trace(
         if perm_idx < P2_K_SEL_COUNT {
             tracked_outputs[perm_idx] = trace.states[poseidon2::TOTAL_ROUNDS][0];
         }
-        next_row = fill_poseidon2_rows(&mut values, &trace, constants, perm_idx as u64, next_row, None);
+        next_row = fill_poseidon2_rows(
+            &mut values,
+            &trace,
+            constants,
+            perm_idx as u64,
+            next_row,
+            None,
+        );
     }
 
     for row in 0..trace_height {

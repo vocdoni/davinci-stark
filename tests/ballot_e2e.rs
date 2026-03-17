@@ -1526,7 +1526,10 @@ fn test_circom_ballot_checker_all_zero_with_positive_min_cost_invalid() {
         0,
     );
 
-    assert_invalid_ballot_rejected(inputs, "all-zero ballot with positive min total cost should fail");
+    assert_invalid_ballot_rejected(
+        inputs,
+        "all-zero ballot with positive min total cost should fail",
+    );
 }
 
 #[test]
@@ -1559,15 +1562,17 @@ fn test_circom_style_full_ballot_proof() {
     let (proof, outputs) = davinci_stark::prove_full_ballot(&inputs);
     davinci_stark::verify_ballot(&proof).expect("circom-style full ballot proof should verify");
 
-    assert_eq!(proof.public_values[davinci_stark::air::PV_VOTE_ID], outputs.vote_id);
     assert_eq!(
-        &proof.public_values[davinci_stark::air::PV_INPUTS_HASH
-            ..davinci_stark::air::PV_INPUTS_HASH + 4],
+        proof.public_values[davinci_stark::air::PV_VOTE_ID],
+        outputs.vote_id
+    );
+    assert_eq!(
+        &proof.public_values
+            [davinci_stark::air::PV_INPUTS_HASH..davinci_stark::air::PV_INPUTS_HASH + 4],
         &outputs.inputs_hash
     );
     assert_eq!(
-        &proof.public_values[davinci_stark::air::PV_ADDRESS
-            ..davinci_stark::air::PV_ADDRESS + 4],
+        &proof.public_values[davinci_stark::air::PV_ADDRESS..davinci_stark::air::PV_ADDRESS + 4],
         &inputs.address
     );
 }
@@ -1606,5 +1611,48 @@ fn test_inputs_hash_must_match_the_public_preimage() {
     assert!(
         davinci_stark::verify_ballot(&proof).is_err(),
         "verifier must reject proofs whose public inputs-hash preimage is tampered",
+    );
+}
+
+#[test]
+fn test_verify_ballot_wire_rejects_wrong_public_value_length() {
+    let inputs = base_ballot_inputs(
+        [
+            Scalar([1, 0, 0, 0, 0]),
+            Scalar([2, 0, 0, 0, 0]),
+            Scalar([3, 0, 0, 0, 0]),
+            Scalar([4, 0, 0, 0, 0]),
+            Scalar([5, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+            Scalar([0, 0, 0, 0, 0]),
+        ],
+        BallotMode {
+            num_fields: 5,
+            group_size: 1,
+            unique_values: 1,
+            cost_from_weight: 0,
+            cost_exponent: 2,
+            max_value: 16,
+            min_value: 0,
+            max_value_sum: 1125,
+            min_value_sum: 5,
+        },
+        1,
+    );
+
+    let (proof, _) = davinci_stark::prove_full_ballot(&inputs);
+    let proof_bytes = postcard::to_allocvec(&proof.proof).expect("proof serialization");
+    let short_public_values = &proof.public_values[..proof.public_values.len() - 1];
+    let short_public_values_u64 = short_public_values
+        .iter()
+        .map(|v| v.as_canonical_u64())
+        .collect::<Vec<_>>();
+
+    let err = davinci_stark::verify_ballot_wire(&proof_bytes, &short_public_values_u64)
+        .expect_err("wire verifier must reject malformed public values");
+    assert!(
+        err.contains("invalid public-value length"),
+        "unexpected error: {err}"
     );
 }

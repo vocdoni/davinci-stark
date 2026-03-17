@@ -20,13 +20,3 @@ pub fn keygen(sk_bytes: &[u8]) -> (Scalar, Point) {
     let pk = Point::mulgen(sk);
     (sk, pk)
 }
-
-/// Prepare ElGamal encryption scalars from a field value and randomness bytes.
-///
-/// Returns (k, field_scalar) ready for use as STARK inputs. The actual
-/// encryption (point multiplications) happens inside the circuit.
-pub fn encrypt(field_val: u64, k_bytes: &[u8], _pk: &Point) -> (Scalar, Scalar) {
-    let k = Scalar::decode_reduce(k_bytes);
-    let field_scalar = Scalar([field_val, 0, 0, 0, 0]);
-    (k, field_scalar)
-}

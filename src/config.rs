@@ -23,7 +23,7 @@ use p3_dft::Radix2DitParallel;
 use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
 use p3_fri::{FriParameters, HidingFriPcs};
-use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
+use p3_goldilocks::Goldilocks;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::StarkConfig;
@@ -36,7 +36,7 @@ pub type Val = Goldilocks;
 
 /// Poseidon2 permutation over Goldilocks with width 16 (used for Merkle hashing,
 /// not to be confused with the width-8 Poseidon2 inside the ballot AIR).
-pub type Perm = Poseidon2Goldilocks<16>;
+pub type Perm = crate::zisk_poseidon2::ZiskPoseidon2Goldilocks16;
 
 /// Sponge hash wrapping the width-16 permutation: absorbs 8, squeezes 8.
 pub type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
@@ -46,7 +46,7 @@ pub type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 
 /// Merkle-tree-based MMCS (multi-matrix commitment scheme) over Goldilocks values.
 pub type ValMmcs =
-    MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, MyHash, MyCompress, 8>;
+    MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, MyHash, MyCompress, 2, 8>;
 
 /// Challenge field: degree-2 extension of Goldilocks (gives ~128-bit security).
 pub type Challenge = BinomialExtensionField<Val, 2>;
@@ -100,12 +100,13 @@ fn make_config_with_rng_seed(blinding_seed: u64) -> BallotConfig {
     let perm = Perm::new_from_rng_128(&mut DeterministicRng(42));
     let hash = MyHash::new(perm.clone());
     let compress = MyCompress::new(perm.clone());
-    let val_mmcs = ValMmcs::new(hash, compress);
+    let val_mmcs = ValMmcs::new(hash, compress, 0);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
     let fri_params = FriParameters {
         log_blowup: 3,
         log_final_poly_len: 0,
+        max_log_arity: 1,
         num_queries: 34,
         commit_proof_of_work_bits: 0,
         query_proof_of_work_bits: 0,
@@ -131,32 +132,42 @@ fn entropy_seed() -> u64 {
 }
 
 /// SplitMix64 stream generator used as a seed expander for Plonky3 components.
+#[derive(Clone)]
 pub struct DeterministicRng(pub u64);
 
-impl rand::RngCore for DeterministicRng {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
-    }
-
-    fn next_u64(&mut self) -> u64 {
+impl DeterministicRng {
+    fn splitmix64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
         z ^ (z >> 31)
     }
+}
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+impl rand::TryRng for DeterministicRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.splitmix64() as u32)
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.splitmix64())
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let mut i = 0;
         while i < dest.len() {
-            let val = self.next_u64();
+            let val = self.splitmix64();
             let remaining = dest.len() - i;
             let to_copy = remaining.min(8);
             dest[i..i + to_copy].copy_from_slice(&val.to_le_bytes()[..to_copy]);
             i += to_copy;
         }
+        Ok(())
     }
 }
 
-// This satisfies the trait bounds expected by Plonky3's hiding PCS.
-impl rand::CryptoRng for DeterministicRng {}
+// TryCryptoRng marks this as cryptographically suitable (blanket impls provide Rng + CryptoRng).
+impl rand::TryCryptoRng for DeterministicRng {}

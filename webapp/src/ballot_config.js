@@ -1,20 +1,30 @@
 export function normalizeChoices(input, maxFields = 8) {
   const parsed = input
     .split(',')
-    .map((s) => parseInt(s.trim(), 10))
-    .map((v) => (Number.isFinite(v) ? v : 0))
+    .map((s) => s.trim())
+    .map((s) => (s.length > 0 ? parseBigIntValue(s) : 0n))
     .slice(0, maxFields);
 
   const numFields = parsed.length;
   const choices = parsed.slice();
   while (choices.length < maxFields) {
-    choices.push(0);
+    choices.push(0n);
   }
 
   return { choices, numFields };
 }
 
 export function packBallotMode(config) {
+  assertBitWidth(config.numFields, 8, 'numFields');
+  assertBitWidth(config.groupSize, 8, 'groupSize');
+  assertBitWidth(config.uniqueValues, 1, 'uniqueValues');
+  assertBitWidth(config.costFromWeight, 1, 'costFromWeight');
+  assertBitWidth(config.costExponent, 8, 'costExponent');
+  assertBitWidth(config.maxValue, 48, 'maxValue');
+  assertBitWidth(config.minValue, 48, 'minValue');
+  assertBitWidth(config.maxValueSum, 63, 'maxValueSum');
+  assertBitWidth(config.minValueSum, 63, 'minValueSum');
+
   let bits = 0n;
   bits |= BigInt(config.numFields) & 0xFFn;
   bits |= (BigInt(config.groupSize) & 0xFFn) << 8n;
@@ -34,6 +44,57 @@ export function packBallotMode(config) {
     out.set(bytes, i * 8);
   }
   return out;
+}
+
+export function encodeGoldilocks4Le(value) {
+  let remaining = BigInt(value);
+  if (remaining < 0n) {
+    throw new Error('value must be non-negative');
+  }
+
+  const out = new Uint8Array(32);
+  const mask = (1n << 64n) - 1n;
+  for (let i = 0; i < 4; i++) {
+    const chunk = remaining & mask;
+    out.set(u64ToLeBytes(chunk), i * 8);
+    remaining >>= 64n;
+  }
+  if (remaining !== 0n) {
+    throw new Error('value does not fit in 256 bits');
+  }
+  return out;
+}
+
+export function encodeU64LeChecked(value) {
+  const normalized = BigInt(value);
+  if (normalized < 0n) {
+    throw new Error('value must be non-negative');
+  }
+  if (normalized >> 64n) {
+    throw new Error('value does not fit in u64');
+  }
+  return u64ToLeBytes(normalized);
+}
+
+export function parseBigIntValue(raw) {
+  const value = raw.trim();
+  if (!value) {
+    return 0n;
+  }
+  if (value.startsWith('0x') || value.startsWith('0X')) {
+    return BigInt(value);
+  }
+  return BigInt(value);
+}
+
+function assertBitWidth(value, bits, name) {
+  const normalized = BigInt(value);
+  if (normalized < 0n) {
+    throw new Error(`${name} must be non-negative`);
+  }
+  if (normalized >> BigInt(bits)) {
+    throw new Error(`${name} does not fit in ${bits} bits`);
+  }
 }
 
 function u64ToLeBytes(val) {

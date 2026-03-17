@@ -256,6 +256,19 @@ pub fn verify(proof_data: &[u8]) -> Result<bool, JsValue> {
 
     let proof_bytes = &proof_data[4..4 + proof_len];
     let pv_bytes = &proof_data[4 + proof_len..];
+    let expected_pv_bytes = crate::air::PV_COUNT * 8;
+    if pv_bytes.len() != expected_pv_bytes {
+        return Err(JsValue::from_str(&format!(
+            "Invalid public value length: expected {} bytes, got {}",
+            expected_pv_bytes,
+            pv_bytes.len()
+        )));
+    }
+    if pv_bytes.len() % 8 != 0 {
+        return Err(JsValue::from_str(
+            "Invalid public value encoding: trailing bytes present",
+        ));
+    }
 
     let proof: p3_uni_stark::Proof<crate::config::BallotConfig> = postcard::from_bytes(proof_bytes)
         .map_err(|e| JsValue::from_str(&format!("Deserialization error: {}", e)))?;

@@ -14,9 +14,8 @@
 //! mutually exclusive on every row.
 
 use ecgfp5::curve::Point;
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, BaseAirWithPublicValues};
+use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Algebra, PrimeCharacteristicRing};
-use p3_matrix::Matrix;
 
 use crate::columns::*;
 use crate::gfp5::*;
@@ -77,12 +76,7 @@ where
     fn width(&self) -> usize {
         TRACE_WIDTH
     }
-}
 
-impl<F> BaseAirWithPublicValues<F> for BallotAir
-where
-    F: PrimeCharacteristicRing,
-{
     fn num_public_values(&self) -> usize {
         PV_COUNT
     }
@@ -90,12 +84,12 @@ where
 
 impl<AB> Air<AB> for BallotAir
 where
-    AB: AirBuilder + AirBuilderWithPublicValues,
+    AB: AirBuilder,
 {
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
-        let local = main.row_slice(0).expect("empty trace");
-        let next = main.row_slice(1).expect("trace too short");
+        let local = main.current_slice();
+        let next = main.next_slice();
         let public_values = builder.public_values().to_vec();
 
         let is_ec: AB::Expr = local[IS_EC].clone().into();
@@ -183,7 +177,7 @@ where
 ///
 /// All constraints are multiplied by `gate` so they evaluate to zero on
 /// non-EC rows regardless of what data is in those columns.
-fn eval_ec_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
+fn eval_ec_constraints<AB: AirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
@@ -733,20 +727,16 @@ fn eval_ec_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
             let m_carry = gate.clone() * m_phase_sel[field_idx].clone();
             for limb in 0..5 {
                 when_trans.assert_zero(
-                    m_carry.clone()
-                        * (next_current_s_x[limb].clone() - current_s_x[limb].clone()),
+                    m_carry.clone() * (next_current_s_x[limb].clone() - current_s_x[limb].clone()),
                 );
                 when_trans.assert_zero(
-                    m_carry.clone()
-                        * (next_current_s_z[limb].clone() - current_s_z[limb].clone()),
+                    m_carry.clone() * (next_current_s_z[limb].clone() - current_s_z[limb].clone()),
                 );
                 when_trans.assert_zero(
-                    m_carry.clone()
-                        * (next_current_s_u[limb].clone() - current_s_u[limb].clone()),
+                    m_carry.clone() * (next_current_s_u[limb].clone() - current_s_u[limb].clone()),
                 );
                 when_trans.assert_zero(
-                    m_carry.clone()
-                        * (next_current_s_t[limb].clone() - current_s_t[limb].clone()),
+                    m_carry.clone() * (next_current_s_t[limb].clone() - current_s_t[limb].clone()),
                 );
             }
 
@@ -758,11 +748,11 @@ fn eval_ec_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
                     AB::Expr::ZERO
                 };
                 when_trans.assert_zero(
-                    m_last_field.clone()
-                        * (next[BV_ROW_SEL + other].clone().into() - expected),
+                    m_last_field.clone() * (next[BV_ROW_SEL + other].clone().into() - expected),
                 );
             }
-            when_trans.assert_zero(m_last_field.clone() * next[BV_ROW_SEL + NUM_FIELDS].clone().into());
+            when_trans
+                .assert_zero(m_last_field.clone() * next[BV_ROW_SEL + NUM_FIELDS].clone().into());
             for limb in 0..5 {
                 when_trans.assert_zero(
                     m_last_field.clone()
@@ -785,15 +775,17 @@ fn eval_ec_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
     }
 }
 
-fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
+fn eval_c2_binding_constraints<AB: AirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
     public_values: &[AB::PublicVar],
 ) {
-    let bind_gate =
-        (AB::Expr::ONE - local[IS_EC].clone().into() - local[IS_P2].clone().into() - local[IS_BV].clone().into())
-            * local[EC_BIND_ACTIVE].clone().into();
+    let bind_gate = (AB::Expr::ONE
+        - local[IS_EC].clone().into()
+        - local[IS_P2].clone().into()
+        - local[IS_BV].clone().into())
+        * local[EC_BIND_ACTIVE].clone().into();
     let next_is_ec: AB::Expr = next[IS_EC].clone().into();
     let next_is_p2: AB::Expr = next[IS_P2].clone().into();
 
@@ -851,16 +843,20 @@ fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
         builder.assert_zero(bind_gate.clone() * (base_t[limb].clone() - current_s_t[limb].clone()));
     }
 
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_x.clone(), base_x.clone(), add_at1.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_x.clone(), base_x.clone(), add_at1.clone())
+    {
         builder.assert_zero(bind_gate.clone() * c);
     }
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_z.clone(), base_z.clone(), add_at2.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_z.clone(), base_z.clone(), add_at2.clone())
+    {
         builder.assert_zero(bind_gate.clone() * c);
     }
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_u.clone(), base_u.clone(), add_at3.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_u.clone(), base_u.clone(), add_at3.clone())
+    {
         builder.assert_zero(bind_gate.clone() * c);
     }
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_t.clone(), base_t.clone(), add_at4.clone()) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(acc_t.clone(), base_t.clone(), add_at4.clone())
+    {
         builder.assert_zero(bind_gate.clone() * c);
     }
     for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
@@ -890,7 +886,9 @@ fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
         add_at1.clone(),
         gfp5_mul_by_kz::<AB::F, AB::Expr>(B1, add_at2.clone()),
     );
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(add_at4.clone(), c2_t7.clone(), add_at8.clone()) {
+    for c in
+        gfp5_mul_constraints::<AB::F, AB::Expr>(add_at4.clone(), c2_t7.clone(), add_at8.clone())
+    {
         builder.assert_zero(bind_gate.clone() * c);
     }
     for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
@@ -904,7 +902,10 @@ fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
         builder.assert_zero(bind_gate.clone() * c);
     }
     for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
-        gfp5_add::<AB::F, AB::Expr>(add_at4.clone(), gfp5_scale::<AB::F, AB::Expr>(2, add_at3.clone())),
+        gfp5_add::<AB::F, AB::Expr>(
+            add_at4.clone(),
+            gfp5_scale::<AB::F, AB::Expr>(2, add_at3.clone()),
+        ),
         gfp5_add::<AB::F, AB::Expr>(c2_t5.clone(), c2_t7.clone()),
         add_at10.clone(),
     ) {
@@ -928,17 +929,18 @@ fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
     let expected_sum_z = gfp5_sub::<AB::F, AB::Expr>(add_at8.clone(), add_at9.clone());
     let expected_sum_t = gfp5_add::<AB::F, AB::Expr>(add_at8.clone(), add_at9.clone());
     for limb in 0..5 {
-        builder.assert_zero(bind_gate.clone() * (add_x[limb].clone() - expected_sum_x[limb].clone()));
-        builder.assert_zero(bind_gate.clone() * (add_z[limb].clone() - expected_sum_z[limb].clone()));
+        builder
+            .assert_zero(bind_gate.clone() * (add_x[limb].clone() - expected_sum_x[limb].clone()));
+        builder
+            .assert_zero(bind_gate.clone() * (add_z[limb].clone() - expected_sum_z[limb].clone()));
         builder.assert_zero(bind_gate.clone() * (add_u[limb].clone() - add_u_pre[limb].clone()));
-        builder.assert_zero(bind_gate.clone() * (add_t[limb].clone() - expected_sum_t[limb].clone()));
-        builder.assert_zero(bind_gate.clone() * (c2_enc[limb].clone() - expected_c2_enc[limb].clone()));
+        builder
+            .assert_zero(bind_gate.clone() * (add_t[limb].clone() - expected_sum_t[limb].clone()));
+        builder.assert_zero(
+            bind_gate.clone() * (c2_enc[limb].clone() - expected_c2_enc[limb].clone()),
+        );
     }
-    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(
-        c2_enc.clone(),
-        add_u.clone(),
-        add_t.clone(),
-    ) {
+    for c in gfp5_mul_constraints::<AB::F, AB::Expr>(c2_enc.clone(), add_u.clone(), add_t.clone()) {
         builder.assert_zero(bind_gate.clone() * c);
     }
 
@@ -946,9 +948,15 @@ fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
     for field_idx in 0..NUM_FIELDS - 1 {
         let gate = bind_gate.clone() * field_sel[field_idx].clone();
         when_trans.assert_zero(gate.clone() * (next_is_ec.clone() - AB::Expr::ONE));
-        when_trans.assert_zero(gate.clone() * next[PHASE].clone().into() - gate.clone() * AB::Expr::from_u64((3 * (field_idx + 1)) as u64));
-        when_trans.assert_zero(gate.clone() * (next[EC_BIND_ACTIVE].clone().into() - AB::Expr::ONE));
-        when_trans.assert_zero(gate.clone() * (next[EC_SCALAR_ACC].clone().into() - next[BIT].clone().into()));
+        when_trans.assert_zero(
+            gate.clone() * next[PHASE].clone().into()
+                - gate.clone() * AB::Expr::from_u64((3 * (field_idx + 1)) as u64),
+        );
+        when_trans
+            .assert_zero(gate.clone() * (next[EC_BIND_ACTIVE].clone().into() - AB::Expr::ONE));
+        when_trans.assert_zero(
+            gate.clone() * (next[EC_SCALAR_ACC].clone().into() - next[BIT].clone().into()),
+        );
         for limb in 0..5 {
             when_trans.assert_zero(gate.clone() * next[ACC_X + limb].clone().into());
             when_trans.assert_zero(gate.clone() * next[ACC_U + limb].clone().into());
@@ -969,15 +977,17 @@ fn eval_c2_binding_constraints<AB: AirBuilder + AirBuilderWithPublicValues>(
     }
 }
 
-fn eval_packed_mode_rows<AB: AirBuilder + AirBuilderWithPublicValues>(
+fn eval_packed_mode_rows<AB: AirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
     public_values: &[AB::PublicVar],
 ) {
     let public_preimage = |idx: usize| public_values[PV_INPUTS_PREIMAGE + idx].clone().into();
-    let current_gap =
-        AB::Expr::ONE - local[IS_EC].clone().into() - local[IS_P2].clone().into() - local[IS_BV].clone().into();
+    let current_gap = AB::Expr::ONE
+        - local[IS_EC].clone().into()
+        - local[IS_P2].clone().into()
+        - local[IS_BV].clone().into();
     let next_is_p2: AB::Expr = next[IS_P2].clone().into();
     let next_is_ec: AB::Expr = next[IS_EC].clone().into();
     let mode_gate = |chunk: usize| {
@@ -1023,13 +1033,21 @@ fn eval_packed_mode_rows<AB: AirBuilder + AirBuilderWithPublicValues>(
     }
 
     let chunk0 = mode_gate(0);
-    builder.assert_zero(chunk0.clone() * (decode_local(0, 8) - local[GLOBAL_BV_NUM_FIELDS].clone().into()));
-    builder.assert_zero(chunk0.clone() * (decode_local(8, 8) - local[GLOBAL_BV_GROUP_SIZE].clone().into()));
-    builder.assert_zero(chunk0.clone() * (decode_local(16, 1) - local[GLOBAL_BV_UNIQUE].clone().into()));
+    builder.assert_zero(
+        chunk0.clone() * (decode_local(0, 8) - local[GLOBAL_BV_NUM_FIELDS].clone().into()),
+    );
+    builder.assert_zero(
+        chunk0.clone() * (decode_local(8, 8) - local[GLOBAL_BV_GROUP_SIZE].clone().into()),
+    );
+    builder.assert_zero(
+        chunk0.clone() * (decode_local(16, 1) - local[GLOBAL_BV_UNIQUE].clone().into()),
+    );
     builder.assert_zero(
         chunk0.clone() * (decode_local(17, 1) - local[GLOBAL_BV_COST_FROM_WEIGHT].clone().into()),
     );
-    builder.assert_zero(chunk0.clone() * (decode_local(18, 8) - local[GLOBAL_BV_COST_EXP].clone().into()));
+    builder.assert_zero(
+        chunk0.clone() * (decode_local(18, 8) - local[GLOBAL_BV_COST_EXP].clone().into()),
+    );
     builder.assert_zero(
         chunk0.clone()
             * (decode_local(26, 36) + AB::Expr::from_u64(1u64 << 36) * decode_next(0, 12)
@@ -1037,7 +1055,9 @@ fn eval_packed_mode_rows<AB: AirBuilder + AirBuilderWithPublicValues>(
     );
 
     let chunk1 = mode_gate(1);
-    builder.assert_zero(chunk1.clone() * (decode_local(12, 48) - local[GLOBAL_BV_MIN_VALUE].clone().into()));
+    builder.assert_zero(
+        chunk1.clone() * (decode_local(12, 48) - local[GLOBAL_BV_MIN_VALUE].clone().into()),
+    );
     builder.assert_zero(
         chunk1.clone()
             * (decode_local(60, 2) + AB::Expr::from_u64(4) * decode_next(0, 61)
@@ -1069,17 +1089,23 @@ fn eval_packed_mode_rows<AB: AirBuilder + AirBuilderWithPublicValues>(
     when_trans.assert_zero(chunk0.clone() * next[IS_P2].clone().into());
     when_trans.assert_zero(chunk0.clone() * next[IS_BV].clone().into());
     when_trans.assert_zero(chunk0.clone() * next[EC_BIND_ACTIVE].clone().into());
-    when_trans.assert_zero(chunk0.clone() * (next[P2_VOTE_ID_PRE_SEL + 1].clone().into() - AB::Expr::ONE));
+    when_trans.assert_zero(
+        chunk0.clone() * (next[P2_VOTE_ID_PRE_SEL + 1].clone().into() - AB::Expr::ONE),
+    );
     when_trans.assert_zero(chunk1.clone() * next[IS_EC].clone().into());
     when_trans.assert_zero(chunk1.clone() * next[IS_P2].clone().into());
     when_trans.assert_zero(chunk1.clone() * next[IS_BV].clone().into());
     when_trans.assert_zero(chunk1.clone() * next[EC_BIND_ACTIVE].clone().into());
-    when_trans.assert_zero(chunk1.clone() * (next[P2_VOTE_ID_PRE_SEL + 2].clone().into() - AB::Expr::ONE));
+    when_trans.assert_zero(
+        chunk1.clone() * (next[P2_VOTE_ID_PRE_SEL + 2].clone().into() - AB::Expr::ONE),
+    );
     when_trans.assert_zero(chunk2.clone() * next[IS_EC].clone().into());
     when_trans.assert_zero(chunk2.clone() * next[IS_P2].clone().into());
     when_trans.assert_zero(chunk2.clone() * next[IS_BV].clone().into());
     when_trans.assert_zero(chunk2.clone() * next[EC_BIND_ACTIVE].clone().into());
-    when_trans.assert_zero(chunk2.clone() * (next[P2_VOTE_ID_PRE_SEL + 3].clone().into() - AB::Expr::ONE));
+    when_trans.assert_zero(
+        chunk2.clone() * (next[P2_VOTE_ID_PRE_SEL + 3].clone().into() - AB::Expr::ONE),
+    );
     when_trans.assert_zero(chunk3.clone() * (next_is_ec - AB::Expr::ONE));
 }
 
@@ -1359,7 +1385,8 @@ fn eval_poseidon2_constraints<AB: AirBuilder>(
         expected_next_vote[0] = k_selectors[7].clone();
         for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
             if i + 1 < P2_VOTE_ID_PRE_SEL_COUNT {
-                expected_next_vote[i + 1] = expected_next_vote[i + 1].clone() + vote_selectors[i].clone();
+                expected_next_vote[i + 1] =
+                    expected_next_vote[i + 1].clone() + vote_selectors[i].clone();
             }
         }
 
@@ -1417,11 +1444,11 @@ fn eval_global_bindings<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], nex
         bind_gap.clone() * next_is_p2.clone() * (next[P2_K_SEL].clone().into() - AB::Expr::ONE),
     );
     for i in 1..P2_K_SEL_COUNT {
-        when_trans.assert_zero(bind_gap.clone() * next_is_p2.clone() * next[P2_K_SEL + i].clone().into());
+        when_trans
+            .assert_zero(bind_gap.clone() * next_is_p2.clone() * next[P2_K_SEL + i].clone().into());
     }
 
-    when_trans
-        .assert_zero(plain_gap.clone() * next_is_p2.clone() * next[P2_K_SEL].clone().into());
+    when_trans.assert_zero(plain_gap.clone() * next_is_p2.clone() * next[P2_K_SEL].clone().into());
     for i in 1..P2_K_SEL_COUNT {
         when_trans.assert_zero(
             plain_gap.clone()
@@ -1431,7 +1458,7 @@ fn eval_global_bindings<AB: AirBuilder>(builder: &mut AB, local: &[AB::Var], nex
     }
 }
 
-fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>(
+fn eval_poseidon_statement_bindings<AB: AirBuilder>(
     builder: &mut AB,
     local: &[AB::Var],
     next: &[AB::Var],
@@ -1476,7 +1503,8 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
         let fb1 = mat4(&input[4], &input[5], &input[6], &input[7]);
         for i in 0..4 {
             let sum = fb0[i].clone() + fb1[i].clone();
-            builder.assert_zero(gate.clone() * (col(P2_STATE + i) - (fb0[i].clone() + sum.clone())));
+            builder
+                .assert_zero(gate.clone() * (col(P2_STATE + i) - (fb0[i].clone() + sum.clone())));
             builder.assert_zero(gate.clone() * (col(P2_STATE + 4 + i) - (fb1[i].clone() + sum)));
         }
     }
@@ -1502,8 +1530,7 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
     builder.assert_zero(vote_out.clone() * (col(P2_STATE) - raw_bits));
     builder.assert_zero(
         vote_out.clone()
-            * (public_values[PV_VOTE_ID].clone().into()
-                - (low63 + AB::Expr::from_u64(1u64 << 63))),
+            * (public_values[PV_VOTE_ID].clone().into() - (low63 + AB::Expr::from_u64(1u64 << 63))),
     );
 
     let vote_sel: Vec<AB::Expr> = (0..P2_VOTE_ID_PRE_SEL_COUNT)
@@ -1519,24 +1546,36 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
     }
     builder.assert_zero(active.clone() * (active.clone() - AB::Expr::ONE));
     for i in 0..P2_VOTE_ID_PRE_SEL_COUNT {
-        builder.assert_zero(preperm_gate.clone() * (ncol(P2_VOTE_ID_PRE_SEL + i) - vote_sel[i].clone()));
+        builder.assert_zero(
+            preperm_gate.clone() * (ncol(P2_VOTE_ID_PRE_SEL + i) - vote_sel[i].clone()),
+        );
     }
-    builder.assert_zero(preperm_gate.clone() * (ncol(P2_PERM_ID) - col(P2_PERM_ID) - AB::Expr::ONE));
+    builder
+        .assert_zero(preperm_gate.clone() * (ncol(P2_PERM_ID) - col(P2_PERM_ID) - AB::Expr::ONE));
     builder.assert_zero(preperm_gate.clone() * ncol(P2_VOTE_ID_OUT));
 
-    let mut expected_chunk = [AB::Expr::ZERO, AB::Expr::ZERO, AB::Expr::ZERO, AB::Expr::ZERO];
+    let mut expected_chunk = [
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+        AB::Expr::ZERO,
+    ];
     for i in 0..4 {
         expected_chunk[i] = expected_chunk[i].clone()
             + vote_sel[0].clone() * public_preimage(i)
-            + vote_sel[1].clone() * public_values[PV_ADDRESS + i].clone().into()
-            ;
+            + vote_sel[1].clone() * public_values[PV_ADDRESS + i].clone().into();
     }
     for i in 0..4 {
-        expected_chunk[i] = expected_chunk[i].clone() + vote_sel[2].clone() * col(GLOBAL_K_LIMBS + i);
+        expected_chunk[i] =
+            expected_chunk[i].clone() + vote_sel[2].clone() * col(GLOBAL_K_LIMBS + i);
     }
     expected_chunk[0] = expected_chunk[0].clone() + vote_sel[3].clone() * col(GLOBAL_K_LIMBS + 4);
     for i in 0..4 {
-        builder.assert_zero(preperm_gate.clone() * active.clone() * (col(P2_ABSORB_CHUNK + i) - expected_chunk[i].clone()));
+        builder.assert_zero(
+            preperm_gate.clone()
+                * active.clone()
+                * (col(P2_ABSORB_CHUNK + i) - expected_chunk[i].clone()),
+        );
     }
 
     let first_hash = vote_sel[0].clone();
@@ -1558,15 +1597,24 @@ fn eval_poseidon_statement_bindings<AB: AirBuilder + AirBuilderWithPublicValues>
         } else {
             AB::Expr::ZERO
         };
-        absorbed[i] = continuing.clone() * (prev_lane.clone() + chunk.clone()) + first_hash.clone() * chunk;
+        absorbed[i] =
+            continuing.clone() * (prev_lane.clone() + chunk.clone()) + first_hash.clone() * chunk;
     }
 
     let fb0 = mat4(&absorbed[0], &absorbed[1], &absorbed[2], &absorbed[3]);
     let fb1 = mat4(&absorbed[4], &absorbed[5], &absorbed[6], &absorbed[7]);
     for i in 0..4 {
         let sum = fb0[i].clone() + fb1[i].clone();
-        builder.assert_zero(preperm_gate.clone() * active.clone() * (ncol(P2_STATE + i) - (fb0[i].clone() + sum.clone())));
-        builder.assert_zero(preperm_gate.clone() * active.clone() * (ncol(P2_STATE + 4 + i) - (fb1[i].clone() + sum)));
+        builder.assert_zero(
+            preperm_gate.clone()
+                * active.clone()
+                * (ncol(P2_STATE + i) - (fb0[i].clone() + sum.clone())),
+        );
+        builder.assert_zero(
+            preperm_gate.clone()
+                * active.clone()
+                * (ncol(P2_STATE + 4 + i) - (fb1[i].clone() + sum)),
+        );
     }
 }
 

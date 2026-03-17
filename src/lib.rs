@@ -17,15 +17,17 @@ pub mod elgamal;
 pub mod gfp5;
 pub mod poseidon2;
 pub mod trace;
+mod zisk_poseidon2;
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
 use air::BallotAir;
 use config::{BallotConfig, make_prover_config, make_verifier_config};
+use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks;
-use poseidon2::{Poseidon2Constants, poseidon2_hash};
 use p3_uni_stark::{Proof, prove, verify};
+use poseidon2::{Poseidon2Constants, poseidon2_hash};
 use trace::{BallotInputs, BallotOutputs, generate_full_ballot_trace};
 
 /// A complete ballot proof: the STARK proof object plus the public values
@@ -60,6 +62,28 @@ pub fn prove_full_ballot(inputs: &BallotInputs) -> (BallotProof, BallotOutputs) 
 /// Reconstructs the STARK config (deterministic, same as the prover), runs the
 /// Plonky3 verifier, then recomputes the Circom-compatible `inputs_hash` from
 /// the AIR-bound public preimage and checks its address and vote-id slots.
+pub fn verify_ballot_wire(proof_bytes: &[u8], public_values_u64: &[u64]) -> Result<(), String> {
+    if public_values_u64.len() != air::PV_COUNT {
+        return Err(format!(
+            "invalid public-value length: expected {}, got {}",
+            air::PV_COUNT,
+            public_values_u64.len()
+        ));
+    }
+    let proof: Proof<BallotConfig> = postcard::from_bytes(proof_bytes)
+        .map_err(|err| format!("failed to decode proof bytes: {err}"))?;
+    let public_values = public_values_u64
+        .iter()
+        .copied()
+        .map(Goldilocks::from_u64)
+        .collect();
+    let ballot_proof = BallotProof {
+        proof,
+        public_values,
+    };
+    verify_ballot(&ballot_proof)
+}
+
 pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), String> {
     let config = make_verifier_config();
     let air = BallotAir::new();
@@ -80,7 +104,8 @@ pub fn verify_ballot(ballot_proof: &BallotProof) -> Result<(), String> {
         ));
     }
 
-    let preimage = &pv[air::PV_INPUTS_PREIMAGE..air::PV_INPUTS_PREIMAGE + air::PV_INPUTS_PREIMAGE_COUNT];
+    let preimage =
+        &pv[air::PV_INPUTS_PREIMAGE..air::PV_INPUTS_PREIMAGE + air::PV_INPUTS_PREIMAGE_COUNT];
     let expected_hash = poseidon2_hash(preimage, 4, &Poseidon2Constants::new());
     if expected_hash.as_slice() != &pv[air::PV_INPUTS_HASH..air::PV_INPUTS_HASH + 4] {
         return Err("inputs_hash does not match the public preimage".to_string());

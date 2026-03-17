@@ -120,6 +120,9 @@ Key architectural choices:
 - **Challenger**: Duplex sponge based on width-16 Poseidon2 over Goldilocks. This
   generates all Fiat-Shamir challenges (used internally by the STARK prover/verifier,
   separate from the width-8 Poseidon2 used in the ballot circuit).
+  This repository uses the ZisK-compatible width-16 `Poseidon16` constant set for
+  transcript and Merkle hashing, not the upstream Plonky3 `new_from_rng_128` width-16
+  generator.
 
 ### Cryptographic components
 
@@ -128,7 +131,7 @@ Key architectural choices:
 | STARK prover/verifier | Plonky3 `p3-uni-stark` v0.4.2 | Uni-variate FRI-based STARK |
 | Polynomial commitment | HidingFriPcs (FRI + blinding) | ZK = true, entropy-seeded RNG |
 | Hash (ballot circuit) | Poseidon2 width-8 | Zisk-compatible (Horizen Labs constants) |
-| Hash (STARK infra) | Poseidon2 width-16 | Merkle tree hashing, Fiat-Shamir |
+| Hash (STARK infra) | Poseidon2 width-16 | ZisK-compatible `Poseidon16` permutation for Merkle tree hashing and Fiat-Shamir |
 | Elliptic curve | [ecgfp5](https://github.com/pornin/ecgfp5) | Jacobi quartic over GF(p^5) |
 | Encryption | ElGamal over ecgfp5 | 3 scalar muls per vote field |
 | Serialization | postcard (compact binary) | Proof wire format |

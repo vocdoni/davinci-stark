@@ -6,7 +6,8 @@
 
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::{
-    Goldilocks, HL_GOLDILOCKS_8_EXTERNAL_ROUND_CONSTANTS, HL_GOLDILOCKS_8_INTERNAL_ROUND_CONSTANTS,
+    Goldilocks, GOLDILOCKS_POSEIDON2_RC_8_EXTERNAL_FINAL,
+    GOLDILOCKS_POSEIDON2_RC_8_EXTERNAL_INITIAL, GOLDILOCKS_POSEIDON2_RC_8_INTERNAL,
     MATRIX_DIAG_8_GOLDILOCKS,
 };
 
@@ -31,13 +32,16 @@ impl Poseidon2Constants {
     /// Load the upstream Plonky3 Horizen Labs constants used by the ZisK precompile.
     pub fn new() -> Self {
         let mut external_rc = Vec::with_capacity(ROUNDS_F);
-        for round_group in HL_GOLDILOCKS_8_EXTERNAL_ROUND_CONSTANTS {
-            for round in round_group {
-                external_rc.push(Goldilocks::new_array(round));
-            }
+        // Initial full rounds (4 rounds)
+        for round in &GOLDILOCKS_POSEIDON2_RC_8_EXTERNAL_INITIAL {
+            external_rc.push(*round);
+        }
+        // Final full rounds (4 rounds)
+        for round in &GOLDILOCKS_POSEIDON2_RC_8_EXTERNAL_FINAL {
+            external_rc.push(*round);
         }
 
-        let internal_rc = Goldilocks::new_array(HL_GOLDILOCKS_8_INTERNAL_ROUND_CONSTANTS).to_vec();
+        let internal_rc = GOLDILOCKS_POSEIDON2_RC_8_INTERNAL.to_vec();
 
         Self {
             external_rc,
@@ -298,28 +302,31 @@ mod tests {
         let trace = poseidon2_permute_traced(&input, &constants);
         let output = trace.states.last().unwrap();
 
-        // Expected values from Zisk's test_poseidon2_8 in pil2-proofman
+        // Expected values from Plonky3 v0.5.0 Goldilocks Poseidon2 width-8.
+        // The diagonal matrix changed from HL constants (v0.4.x) to new values (v0.5.0).
+        // With the recursion aggregation plan, ballot STARK proofs are verified
+        // outside ZisK, so ZisK precompile compatibility for width-8 is not needed.
         let expected: [u64; 8] = [
-            14266028122062624699,
-            5353147180106052723,
-            15203350112844181434,
-            17630919042639565165,
-            16601551015858213987,
-            10184091939013874068,
-            16774100645754596496,
-            12047415603622314780,
+            14758079437403499858,
+            4768220715988658038,
+            9988209636190012306,
+            8808631253505580005,
+            17526572370116009359,
+            1590367810676479047,
+            13027328087430412699,
+            13357513690486523336,
         ];
 
         for i in 0..8 {
             assert_eq!(
                 output[i].as_canonical_u64(),
                 expected[i],
-                "Poseidon2 output[{}] mismatch: got {}, expected {} (Zisk)",
+                "Poseidon2 output[{}] mismatch: got {}, expected {}",
                 i,
                 output[i].as_canonical_u64(),
                 expected[i]
             );
         }
-        println!("✅ Poseidon2 permutation matches Zisk test vector!");
+        println!("✅ Poseidon2 width-8 permutation matches expected test vector!");
     }
 }

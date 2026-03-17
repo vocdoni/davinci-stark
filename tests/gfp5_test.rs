@@ -2,7 +2,7 @@
 
 use core::borrow::Borrow;
 
-use p3_air::{Air, AirBuilder, BaseAir};
+use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
@@ -10,7 +10,6 @@ use p3_field::extension::BinomialExtensionField;
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_fri::{TwoAdicFriPcs, create_test_fri_params};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
-use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
@@ -50,12 +49,12 @@ impl<F: PrimeCharacteristicRing> BaseAir<F> for Gfp5MulAir {
 impl<AB: AirBuilder> Air<AB> for Gfp5MulAir {
     fn eval(&self, builder: &mut AB) {
         let main = builder.main();
-        let local = main.row_slice(0).expect("empty");
+        let local = main.current_slice();
         let local: &Gfp5MulRow<AB::Var> = (*local).borrow();
 
-        let a: [AB::Expr; 5] = local.a.clone().map(|v| v.into());
-        let b: [AB::Expr; 5] = local.b.clone().map(|v| v.into());
-        let c: [AB::Expr; 5] = local.c.clone().map(|v| v.into());
+        let a: [AB::Expr; 5] = local.a.clone().map(|v: AB::Var| v.into());
+        let b: [AB::Expr; 5] = local.b.clone().map(|v: AB::Var| v.into());
+        let c: [AB::Expr; 5] = local.c.clone().map(|v: AB::Var| v.into());
 
         // Constrain c = a * b in GF(p^5)
         let constraints = gfp5_mul_constraints::<AB::F, AB::Expr>(a, b, c);
@@ -118,7 +117,7 @@ type Perm = Poseidon2Goldilocks<16>;
 type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
 type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
 type ValMmcs =
-    MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, MyHash, MyCompress, 8>;
+    MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, MyHash, MyCompress, 2, 8>;
 type Challenge = BinomialExtensionField<Val, 2>;
 type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
@@ -131,7 +130,7 @@ fn make_config() -> MyConfig {
     let perm = Perm::new_from_rng_128(&mut rng);
     let hash = MyHash::new(perm.clone());
     let compress = MyCompress::new(perm.clone());
-    let val_mmcs = ValMmcs::new(hash, compress);
+    let val_mmcs = ValMmcs::new(hash, compress, 0);
     let challenge_mmcs = ChallengeMmcs::new(val_mmcs.clone());
     let dft = Dft::default();
     let fri_params = create_test_fri_params(challenge_mmcs, 0);

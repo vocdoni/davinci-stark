@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_vendor, values("zisk"))'] }
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -14,30 +17,34 @@ parallel = ["p3-uni-stark/parallel", "p3-maybe-rayon/parallel"]
 
 [dependencies]
 # Plonky3 STARK (pure Rust, no_std compatible, WASM-friendly)
-p3-air = { version = "0.4.2", default-features = false }
-p3-uni-stark = { version = "0.4.2", default-features = false }
-p3-fri = "0.4.2"
-p3-goldilocks = { version = "0.4.2", default-features = false }
-p3-field = { version = "0.4.2", default-features = false }
-p3-matrix = { version = "0.4.2", default-features = false }
-p3-challenger = { version = "0.4.2", default-features = false }
-p3-symmetric = { version = "0.4.2", default-features = false }
-p3-merkle-tree = { version = "0.4.2", default-features = false }
-p3-commit = { version = "0.4.2", default-features = false }
-p3-dft = { version = "0.4.2", default-features = false }
-p3-poseidon2 = { version = "0.4.2", default-features = false }
-p3-maybe-rayon = { version = "0.4.2", default-features = false }
-p3-util = { version = "0.4.2", default-features = false }
+# Pinned to the same rev as Plonky3-recursion for recursive proof compatibility.
+p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-poseidon2 = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
+p3-util = { git = "https://github.com/Plonky3/Plonky3", rev = "00188f0763d5eb86c5cc1d1b7c5a56cbab356593", default-features = false }
 
 # ecgfp5 curve (for trace generation / ElGamal)
 ecgfp5 = { path = "vendor/ecgfp5/rust" }
 
 # Serialization
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive", "alloc"], default-features = false }
 postcard = { version = "1.0", features = ["alloc"], default-features = false }
 
 # Random number generation (needed for Poseidon2 parameter initialization)
-rand = { version = "0.9", default-features = false }
+rand = { version = "0.10", default-features = false }
 
 # OS entropy (used for blinding RNG in HidingFriPcs)
 getrandom = "0.2"
@@ -46,16 +53,15 @@ getrandom = "0.2"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3.4", features = ["wasm_js"] }
 console_error_panic_hook = "0.1"
 
-[dev-dependencies]
-rand = "0.9"
+[target.'cfg(all(target_os = "zkvm", target_vendor = "zisk"))'.dependencies]
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.16.0" }
 
-[patch.crates-io]
-# Patch p3-challenger to fix PoW grinding on wasm32:
-# Original code truncates F::ORDER_U64 via `as usize` (32-bit on wasm32 → 1).
-# Our patch does the division in u64 first and clamps to usize::MAX.
-p3-challenger = { path = "vendor/p3-challenger" }
+
+[dev-dependencies]
+rand = "0.10"
 
 [profile.release]
 opt-level = 3
