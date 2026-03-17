@@ -13,9 +13,9 @@
 //!   - num_queries=34 (~102-bit conjectured soundness with blowup 8)
 //!   - proof_of_work_bits=0 (keeps browser proving practical)
 //!
-//! Note: We ship a patched p3-challenger that fixes the PoW grinding bug on
-//! wasm32. The original code does `F::ORDER_U64 as usize` which truncates
-//! to 1 on 32-bit targets. Our patch divides in u64 first and clamps.
+//! We use width-8 Goldilocks Poseidon2 for all STARK infrastructure hashing.
+//! This matches the Plonky3-recursion library's Goldilocks configuration,
+//! enabling native recursive proof aggregation.
 
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
@@ -23,30 +23,40 @@ use p3_dft::Radix2DitParallel;
 use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
 use p3_fri::{FriParameters, HidingFriPcs};
-use p3_goldilocks::Goldilocks;
+use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon2_8};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::StarkConfig;
 
 // -- Type aliases for the full STARK configuration stack. --
-// Each layer builds on the previous one: field -> hash -> Merkle tree -> PCS -> config.
 
 /// Base field: Goldilocks (p = 2^64 - 2^32 + 1).
 pub type Val = Goldilocks;
 
-/// Poseidon2 permutation over Goldilocks with width 16 (used for Merkle hashing,
-/// not to be confused with the width-8 Poseidon2 inside the ballot AIR).
-pub type Perm = crate::zisk_poseidon2::ZiskPoseidon2Goldilocks16;
+/// Poseidon2 permutation over Goldilocks with width 8.
+/// Matches the Plonky3-recursion GoldilocksD2Width8 configuration.
+pub type Perm = Poseidon2Goldilocks<8>;
 
-/// Sponge hash wrapping the width-16 permutation: absorbs 8, squeezes 8.
-pub type MyHash = PaddingFreeSponge<Perm, 16, 8, 8>;
+/// Width and rate constants for the width-8 Poseidon2 sponge.
+pub const PERM_WIDTH: usize = 8;
+pub const PERM_RATE: usize = 4;
+pub const DIGEST_ELEMS: usize = 4;
 
-/// Merkle tree compression: truncated permutation producing 8-element digests.
-pub type MyCompress = TruncatedPermutation<Perm, 2, 8, 16>;
+/// Sponge hash wrapping the width-8 permutation: absorbs 4, squeezes 4.
+pub type MyHash = PaddingFreeSponge<Perm, PERM_WIDTH, PERM_RATE, DIGEST_ELEMS>;
+
+/// Merkle tree compression: truncated permutation producing 4-element digests.
+pub type MyCompress = TruncatedPermutation<Perm, 2, DIGEST_ELEMS, PERM_WIDTH>;
 
 /// Merkle-tree-based MMCS (multi-matrix commitment scheme) over Goldilocks values.
-pub type ValMmcs =
-    MerkleTreeMmcs<<Val as Field>::Packing, <Val as Field>::Packing, MyHash, MyCompress, 2, 8>;
+pub type ValMmcs = MerkleTreeMmcs<
+    <Val as Field>::Packing,
+    <Val as Field>::Packing,
+    MyHash,
+    MyCompress,
+    2,
+    DIGEST_ELEMS,
+>;
 
 /// Challenge field: degree-2 extension of Goldilocks (gives ~128-bit security).
 pub type Challenge = BinomialExtensionField<Val, 2>;
@@ -54,8 +64,8 @@ pub type Challenge = BinomialExtensionField<Val, 2>;
 /// MMCS lifted to the challenge (extension) field.
 pub type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
 
-/// Fiat-Shamir challenger using the width-16 Poseidon2 duplex sponge.
-pub type Challenger = DuplexChallenger<Val, Perm, 16, 8>;
+/// Fiat-Shamir challenger using the width-8 Poseidon2 duplex sponge.
+pub type Challenger = DuplexChallenger<Val, Perm, PERM_WIDTH, PERM_RATE>;
 
 /// DFT implementation: radix-2 DIT (decimation-in-time) with parallel butterflies.
 pub type Dft = Radix2DitParallel<Val>;
@@ -71,16 +81,6 @@ pub type BallotConfig = StarkConfig<Pcs, Challenge, Challenger>;
 /// This is the config the PROVER should use. The blinding RNG is seeded from
 /// OS entropy (crypto.getRandomValues on WASM, /dev/urandom on Linux) so the
 /// hiding codewords are unpredictable. This is essential for zero-knowledge.
-///
-/// FRI parameters are set for the single browser proving profile used by this repo:
-/// - log_blowup=3 (blowup factor 8, needed for the completed BV AIR)
-/// - num_queries=34 (~102-bit conjectured soundness under the ethSTARK heuristic)
-/// - proof_of_work_bits=0
-///
-/// The degree-4 budget was achieved by storing Poseidon2 x7 S-box outputs
-/// and BV accumulator intermediates as trace columns, reducing the previous
-/// degree-7 constraints down to degree 4. This halved the extended domain
-/// (from 8× to 4× blowup), dramatically improving proving performance.
 pub fn make_prover_config() -> BallotConfig {
     let seed = entropy_seed();
     make_config_with_rng_seed(seed)
@@ -89,15 +89,14 @@ pub fn make_prover_config() -> BallotConfig {
 /// Build the STARK configuration with a fixed blinding seed.
 ///
 /// This is the config the VERIFIER should use. The verifier never generates
-/// blinding codewords, so the RNG seed is irrelevant. Using a fixed seed
-/// avoids needing OS entropy on the verifier side.
+/// blinding codewords, so the RNG seed is irrelevant.
 pub fn make_verifier_config() -> BallotConfig {
     make_config_with_rng_seed(0)
 }
 
 /// Internal: build the config with a specific blinding RNG seed.
 fn make_config_with_rng_seed(blinding_seed: u64) -> BallotConfig {
-    let perm = Perm::new_from_rng_128(&mut DeterministicRng(42));
+    let perm = default_goldilocks_poseidon2_8();
     let hash = MyHash::new(perm.clone());
     let compress = MyCompress::new(perm.clone());
     let val_mmcs = ValMmcs::new(hash, compress, 0);
@@ -119,9 +118,6 @@ fn make_config_with_rng_seed(blinding_seed: u64) -> BallotConfig {
 }
 
 /// Read a blinding seed from OS entropy.
-///
-/// The fallback keeps the API infallible on unsupported targets, but supported
-/// platforms are expected to provide entropy.
 fn entropy_seed() -> u64 {
     let mut buf = [0u8; 8];
     if getrandom::getrandom(&mut buf).is_ok() {
