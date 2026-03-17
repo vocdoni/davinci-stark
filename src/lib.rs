@@ -17,7 +17,6 @@ pub mod elgamal;
 pub mod gfp5;
 pub mod poseidon2;
 pub mod trace;
-mod zisk_poseidon2;
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
